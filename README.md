@@ -22,7 +22,7 @@ Log in with `admin` / `admin` (the dev `mock` auth provider). The default storag
 
 | Wireframe | Where |
 |---|---|
-| 1a Login | centered card, logo mark, email/password (`mock`/`gcloud_identity`) or a "Log in with Google" button (`google_oauth`) |
+| 1a Login | centered card, logo mark, email/password (`mock`/`gcloud_identity`) or a "Log in with Google" button (`google_oauth`); `gcp_iap` skips this screen entirely and signs the user in automatically |
 | 1b Editing | toolbar (title, file info, search, Export Data, Import Data, "Review changes (n)" badge, avatar), grid |
 | 2a Search | as-you-type filtering, blue filter bar (`Showing x of n rows matching "…"`), Clear search, yellow match highlighting; **edits on hidden rows are kept and the badge count is unchanged** |
 | 1c Review | only edited rows, green-tinted changed cells showing `old → new`, cells still editable, summary "n rows · m cells changed", plus a diff panel with struck-through old values |
@@ -94,13 +94,16 @@ Everything is driven by two lines in `config.yaml`:
 
 ```yaml
 auth:
-  provider: google_oauth   # or: mock | gcloud_identity
+  provider: google_oauth   # or: mock | gcloud_identity | gcp_iap
 storage:
   provider: gcs_parquet    # or: local_csv | bigquery
 ```
 
 ### Auth: Google OAuth (988 deployment)
 `google_oauth` has the app itself run the full OAuth authorization-code flow — no fronting proxy involved. See [CONFIG.md](CONFIG.md#google_oauth--google-oauth-run-by-this-app-988-gcp-deployment) for the config block and [GCP deployment](#gcp-deployment) below for consent-screen/credentials setup.
+
+### Auth: Google Cloud IAP (alternative to Google OAuth)
+`gcp_iap` is for deployments that put the app behind an Identity-Aware Proxy load balancer instead: IAP handles Google sign-in and forwards a signed identity JWT, so the app never renders a login form. See [CONFIG.md](CONFIG.md#gcp_iap--google-cloud-identity-aware-proxy) for the config block and [IAP setup](#iap-setup-gcp_iap) below for the load-balancer/IAM steps.
 
 ### Storage: GCS parquet + BigQuery change log (988 deployment)
 `gcs_parquet` reads/writes a single parquet object on GCS (in-memory only — never a local temp file) and logs a structured before/after trail to BigQuery on every publish. See [CONFIG.md](CONFIG.md#gcs_parquet--gcs-parquet-file--bigquery-change-log-988-gcp-deployment) for the config block.
@@ -120,7 +123,7 @@ register_storage_provider("postgres",
     lambda: _import("providers.storage.postgres", "PostgresStorageProvider"))
 ```
 
-The contract is documented in `providers/storage/base.py`: `load()` must return a DataFrame indexed by a stable unique row id; `apply_edits()` receives already-validated `{(row_id, column): value}` and should persist atomically where the backend allows; `replace_all()`/`supports_import` are optional (only needed to support the Import feature); `write_audit()`/`audit_before_data_write` are optional (only needed for an audit trail). Same pattern for auth in `providers/auth/` — `authenticate()` for a credential-form provider, or `redirect_based = True` + `get_login_url()`/`complete_login()` for a redirect-based one (see `google_oauth.py`).
+The contract is documented in `providers/storage/base.py`: `load()` must return a DataFrame indexed by a stable unique row id; `apply_edits()` receives already-validated `{(row_id, column): value}` and should persist atomically where the backend allows; `replace_all()`/`supports_import` are optional (only needed to support the Import feature); `write_audit()`/`audit_before_data_write` are optional (only needed for an audit trail). Same pattern for auth in `providers/auth/` — `authenticate()` for a credential-form provider, `redirect_based = True` + `get_login_url()`/`complete_login()` for a redirect-based one (see `google_oauth.py`), or `header_based = True` + `authenticate_from_headers()` for a fronting-proxy one (see `gcp_iap.py`).
 
 ## Columns & validation
 
@@ -163,6 +166,7 @@ This section covers the `google_oauth` + `gcs_parquet` provider pair specificall
 |---|---|---|
 | `GOOGLE_OAUTH_CLIENT_ID` | `google_oauth` auth | OAuth 2.0 client ID (Google Cloud Console → Credentials) |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | `google_oauth` auth | OAuth 2.0 client secret |
+| `IAP_AUDIENCE` | `gcp_iap` auth | Expected JWT audience, `/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID` — see [IAP setup](#iap-setup-gcp_iap) below |
 | `GOOGLE_APPLICATION_CREDENTIALS` | `gcs_parquet` storage | Path to a service account key JSON — **omit this entirely** if running on GCP infrastructure that already provides Application Default Credentials (Cloud Run's attached runtime service account, GCE metadata server, etc.); only needed for local development against real GCP resources. |
 
 `config.yaml`'s `auth.google_oauth.redirect_uri` (not a secret, but deployment-specific) must exactly match an authorized redirect URI on the OAuth client.
@@ -177,6 +181,26 @@ This section covers the `google_oauth` + `gcs_parquet` provider pair specificall
 1. Google Cloud Console → APIs & Services → OAuth consent screen. Choose **Internal** if every user is in your Google Workspace org, else **External**.
 2. Scopes: `openid`, `email`, `profile` only — Google's non-sensitive bucket, so no app-verification review is required even for an External screen.
 3. Credentials → Create OAuth client ID (Web application). Add the deployed app's URL as an authorized redirect URI, exactly matching `redirect_uri` in `config.yaml`.
+
+### IAP setup (`gcp_iap`)
+
+Only needed if using `gcp_iap` instead of `google_oauth` — IAP replaces the OAuth consent screen/client above entirely.
+
+1. Deploy Cloud Run with public access off and ingress locked to the load balancer, so IAP can't be bypassed by hitting the service directly:
+   ```bash
+   gcloud run deploy 988-data-editor --source . --region us-central1 \
+     --no-allow-unauthenticated --ingress=internal-and-cloud-load-balancing
+   ```
+2. Put an external HTTPS Application Load Balancer with a serverless NEG in front of that Cloud Run service.
+3. Console → Security → Identity-Aware Proxy → enable IAP on that backend service.
+4. Grant `roles/iap.httpsResourceAccessor` ("IAP-secured Web App User"), scoped to the backend service, to the users/group who should have access.
+5. Get the audience string IAP signs the JWT for:
+   ```bash
+   PROJECT_NUMBER=$(gcloud projects describe PROJECT_ID --format='value(projectNumber)')
+   BACKEND_SERVICE_ID=$(gcloud compute backend-services describe SERVICE_NAME --global --format='value(id)')
+   echo "/projects/$PROJECT_NUMBER/global/backendServices/$BACKEND_SERVICE_ID"
+   ```
+6. Set `IAP_AUDIENCE` to that string, set `auth.provider: gcp_iap` in `config.yaml`, redeploy.
 
 ### Cloud Run deploy (example)
 

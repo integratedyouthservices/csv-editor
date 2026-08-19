@@ -18,6 +18,7 @@ _REGISTRY: dict[str, Callable[[], type]] = {
     "google_oauth": lambda: _import(
         "providers.auth.google_oauth", "GoogleOAuthProvider"
     ),
+    "gcp_iap": lambda: _import("providers.auth.gcp_iap", "GcpIapAuthProvider"),
 }
 
 

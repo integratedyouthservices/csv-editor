@@ -39,7 +39,7 @@ One line selects the provider; each provider then reads only its own settings bl
 
 ```yaml
 auth:
-  provider: mock            # ← change this: mock | gcloud_identity | google_oauth
+  provider: mock            # ← change this: mock | gcloud_identity | google_oauth | gcp_iap
 ```
 
 ### `mock` — development only
@@ -83,7 +83,7 @@ The API key comes from your Google Cloud project (Identity Platform → Applicat
 
 ### `google_oauth` — Google OAuth, run by this app (988 GCP deployment)
 
-The app itself performs the full OAuth authorization-code flow: it renders a "Log in with Google" link, Google redirects the browser back with `?code&state`, and the app exchanges the code for an ID token directly. This is **not** the "trust a header from an external proxy" (IAP) pattern — there is no fronting proxy involved.
+The app itself performs the full OAuth authorization-code flow: it renders a "Log in with Google" link, Google redirects the browser back with `?code&state`, and the app exchanges the code for an ID token directly. This is **not** the "trust a header from an external proxy" pattern — there is no fronting proxy involved. If the app instead sits behind an Identity-Aware Proxy load balancer, use `gcp_iap` below.
 
 ```yaml
 auth:
@@ -106,6 +106,28 @@ export GOOGLE_OAUTH_CLIENT_SECRET="...."
 - A rejected/cancelled login and a CSRF `state` mismatch both show a plain-language error and return to the login button; they don't crash the app.
 - **Multi-replica deployments (Cloud Run) must enable session affinity.** The CSRF `state` value round-trips through `st.session_state`, which lives in-process on whichever server instance handled the initial click; if the redirect-back lands on a *different* instance without session affinity, login fails unpredictably.
 - See the README's "GCP deployment" section for the end-to-end setup (consent screen, credentials, IAM, deploy).
+
+### `gcp_iap` — Google Cloud Identity-Aware Proxy
+
+For deployments that put IAP in front of the app (e.g. Cloud Run behind an external HTTPS load balancer with IAP enabled). IAP itself handles the Google sign-in; the app never renders a login form — it just reads and verifies the signed identity JWT (`X-Goog-IAP-JWT-Assertion`) IAP adds to every request. This *is* the "trust a header from an external proxy" pattern `google_oauth` above explicitly isn't — safe here only because the JWT is cryptographically verified against Google's IAP-specific public keys and a specific audience, not merely read off the header.
+
+```yaml
+auth:
+  provider: gcp_iap
+  gcp_iap:
+    audience_env: IAP_AUDIENCE
+    # audience: "..."   # inline fallback — avoid committing
+```
+
+```bash
+pip install google-auth
+export IAP_AUDIENCE="/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID"
+```
+
+- `audience` must match exactly what IAP signs the JWT for. For the typical Cloud Run + external HTTPS load balancer setup this is `/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID` — see [Securing your app with signed headers](https://cloud.google.com/iap/docs/signed-headers-howto#verifying_the_jwt_payload) for how to look up the project number and backend service ID.
+- **The app must actually be unreachable except through IAP.** This provider only trusts the signed JWT (never the plaintext `X-Goog-Authenticated-User-*` headers IAP also sets), but that protection is void if the backend can be reached directly, bypassing the load balancer — e.g. a Cloud Run service with public ingress. Restrict ingress to the load balancer (`--ingress=internal-and-cloud-load-balancing` for Cloud Run) so IAP can't be routed around.
+- "Log out" isn't meaningful from inside the app — IAP re-authenticates from the header on every request, so clearing the app's own session just logs the same identity straight back in. The avatar menu instead links to IAP's own [`/_gcp_iap/clear_login_cookie`](https://cloud.google.com/iap/docs/faq) endpoint, which is IAP's supported way to end the session (e.g. to switch Google accounts).
+- IAP is set up at the load balancer / IAM level (enabling IAP, restricting ingress, granting access), not in this app — see the README's ["IAP setup"](README.md#iap-setup-gcp_iap) for the ordered steps.
 
 ### Adding a new auth provider (e.g. Okta, Azure AD)
 

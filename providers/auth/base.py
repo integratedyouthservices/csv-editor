@@ -1,6 +1,6 @@
 """Auth provider interface.
 
-Two login shapes are supported:
+Three login shapes are supported:
   * Credential providers (the default): a synchronous authenticate(username,
     password) call, driven by a form. Subclass AuthProvider and implement
     authenticate() — see mock.py / gcloud_identity.py.
@@ -11,10 +11,15 @@ Two login shapes are supported:
     CSRF `state` value is generated/stored/compared by the caller (app.py's
     st.session_state) — providers only ever see a plain string, which keeps
     this method provider-agnostic and unit-testable without Streamlit.
+  * Header providers (e.g. a fronting proxy like Google Cloud IAP): identity
+    arrives already verified on the request headers of the session that
+    opened the app — there's no form and no redirect for the app to drive.
+    Set header_based = True and implement authenticate_from_headers()
+    instead; authenticate() is never called for these.
 
 To add a provider:
   1. Subclass AuthProvider and implement authenticate() (or the redirect
-     pair, for a redirect-based provider).
+     pair, or authenticate_from_headers(), depending on the login shape).
   2. Register it in providers/auth/__init__.py.
   3. Point `auth.provider` at it in config.yaml.
 """
@@ -22,7 +27,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,7 @@ class AuthProvider(ABC):
 
     name: str = "base"
     redirect_based: bool = False   # True => use get_login_url/complete_login
+    header_based: bool = False     # True => use authenticate_from_headers
 
     def __init__(self, settings: dict[str, Any]):
         self.settings = settings
@@ -62,7 +68,7 @@ class AuthProvider(ABC):
 
         Raise AuthError for infrastructure problems (bad config,
         network failure) so the UI can distinguish them from a wrong
-        password. Not used by redirect_based providers.
+        password. Not used by redirect_based or header_based providers.
         """
         raise NotImplementedError
 
@@ -77,4 +83,13 @@ class AuthProvider(ABC):
         from the redirect-back for a User. Same None/AuthError convention
         as authenticate() — None for a rejected login, AuthError for an
         infrastructure failure."""
+        raise NotImplementedError
+
+    def authenticate_from_headers(self, headers: Mapping[str, str]) -> Optional[User]:
+        """Header-based providers only: derive a User from the (already
+        verified by the caller, e.g. a signed JWT) request headers of the
+        session that opened the app. Same None/AuthError convention as
+        authenticate() — None when there's no valid identity to read (e.g.
+        the app was reached without going through the fronting proxy),
+        AuthError for an infrastructure failure."""
         raise NotImplementedError

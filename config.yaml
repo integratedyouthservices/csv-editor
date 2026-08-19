@@ -11,13 +11,14 @@ app:
   subtitle: "sign in to edit the dataset"
 
 # ------------------------------------------------------------
-# AUTH — pick one: mock | gcloud_identity | google_oauth
+# AUTH — pick one: mock | gcloud_identity | google_oauth | gcp_iap
 # (register more in providers/auth/__init__.py)
 #
-# For the 988 GCP deployment: set provider: google_oauth below (or point
-# CSV_EDITOR_CONFIG at a separate deployment config file that does) — kept
-# as mock here so `streamlit run app.py` and the test suite work with zero
-# GCP setup. See README.md's "GCP deployment" section.
+# For the 988 GCP deployment: set provider: google_oauth (or gcp_iap, if
+# the app sits behind an Identity-Aware Proxy load balancer) below — or
+# point CSV_EDITOR_CONFIG at a separate deployment config file that does.
+# Kept as mock here so `streamlit run app.py` and the test suite work with
+# zero GCP setup. See README.md's "GCP deployment" section.
 # ------------------------------------------------------------
 auth:
   provider: mock
@@ -46,6 +47,16 @@ auth:
                                                         # OAuth client's authorized
                                                         # redirect URI in Google
                                                         # Cloud Console
+
+  gcp_iap:
+    # Google Cloud Identity-Aware Proxy — a load balancer in front of the
+    # app handles Google sign-in and forwards a signed identity JWT on
+    # every request; the app never renders a login form.
+    # https://cloud.google.com/iap/docs/concepts-overview
+    audience_env: IAP_AUDIENCE
+    # audience: "..."   # inline fallback (avoid committing)
+    #   Format: /projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID
+    #   https://cloud.google.com/iap/docs/signed-headers-howto#verifying_the_jwt_payload
 
 # ------------------------------------------------------------
 # STORAGE — pick one: local_csv | bigquery | gcs_parquet

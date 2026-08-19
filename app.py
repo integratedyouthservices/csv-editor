@@ -316,7 +316,9 @@ def _login_header(cfg: AppConfig) -> None:
 
 def render_login() -> None:
     provider = get_auth_provider()
-    if provider.redirect_based:
+    if provider.header_based:
+        render_header_login(provider)
+    elif provider.redirect_based:
         render_oauth_login(provider)
     else:
         render_credential_login()
@@ -401,6 +403,36 @@ def render_oauth_login(provider) -> None:
         st.link_button("Log in with Google", login_url, type="primary", width="stretch")
 
 
+def render_header_login(provider) -> None:
+    """Header-based providers (e.g. Google Cloud IAP): identity arrives
+    already verified on the request headers of the session that opened the
+    app -- there's no form to submit and no redirect to send the browser
+    on, so this just reads the identity and, if present, logs it straight
+    in.
+    """
+    cfg = get_config()
+    try:
+        user = provider.authenticate_from_headers(st.context.headers)
+    except AuthError as exc:
+        st.error(f"Sign-in is unavailable: {exc}")
+        return
+
+    if user is not None:
+        st.session_state.user = user
+        st.rerun()
+        return
+
+    _, mid, _ = st.columns([1, 1.05, 1])
+    with mid:
+        _login_header(cfg)
+        st.error(
+            "This app must be accessed through its Identity-Aware Proxy "
+            "URL. If you're already doing that and still see this, "
+            "contact your administrator -- IAP isn't passing a valid "
+            "identity header."
+        )
+
+
 # --------------------------------------------------------------- toolbar
 
 
@@ -478,7 +510,17 @@ def render_toolbar(subtitle: str) -> None:
     with c_avatar:
         with st.popover(user.initials, help=user.display_name):
             st.markdown(f"**{esc(user.display_name)}**", unsafe_allow_html=True)
-            if st.button("Log out", width="stretch"):
+            if get_auth_provider().header_based:
+                # IAP re-authenticates from the request header on every
+                # rerun, so clearing session state alone would just log the
+                # same identity straight back in. IAP's own clear-cookie
+                # endpoint is the only real way to end the session (e.g. to
+                # switch accounts): https://cloud.google.com/iap/docs/faq
+                st.caption("Signed in via Identity-Aware Proxy.")
+                st.link_button(
+                    "Switch account", "/_gcp_iap/clear_login_cookie", width="stretch"
+                )
+            elif st.button("Log out", width="stretch"):
                 st.session_state.user = None
                 st.session_state.original_df = None
                 st.session_state.edits = {}
