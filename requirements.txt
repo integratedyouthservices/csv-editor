@@ -3,6 +3,7 @@ pandas>=2.0
 PyYAML>=6.0
 requests>=2.31            # gcloud_identity + google_oauth auth providers
 google-auth>=2.30         # iap + google_oauth auth providers
+PyJWT[crypto]>=2.8        # iap auth provider — google-auth needs this to parse JWK-format certs
 
 # storage.provider = gcs_parquet (default) — change-log audit trail is a
 # BigQuery table, so bigquery deps are required alongside the GCS ones.
