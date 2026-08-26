@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import html
 import json
-import secrets
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -13,7 +12,6 @@ import streamlit as st
 from core.audit import rows_for_edits, rows_for_full_replace
 from core.config import AppConfig, ColumnRule, load_config
 from core.csv_import import extra_columns, missing_columns, validate_dataframe
-from core.oauth_flow import OAuthCallbackKind, interpret_callback
 from core.publish import publish_with_audit
 from core.validation import (
     errors_only,
@@ -254,7 +252,7 @@ def inject_css() -> None:
     )
 
 
-def _login_header(cfg: AppConfig) -> None:
+def _landing_header(cfg: AppConfig) -> None:
     st.markdown(
         f"""
         <div style="max-width:420px;margin:48px auto 12px;text-align:center;">
@@ -268,26 +266,21 @@ def _login_header(cfg: AppConfig) -> None:
     )
 
 
-def render_login() -> None:
-    provider = get_auth_provider()
-    if provider.header_based:
-        render_iap_login(provider)
-    elif provider.redirect_based:
-        render_oauth_login(provider)
-    else:
-        render_credential_login()
-
-
-def _reload_button(label: str = "Retry sign-in") -> None:
-    # st.rerun() replays the script over the existing connection and can't
-    # pick up a fresh IAP assertion header — only a real browser navigation
-    # does, which is what re-enters IAP's own sign-in flow if needed.
+def _nav_button(label: str, url: str, primary: bool = True) -> None:
+    # A real anchor, not st.button + st.rerun(): a rerun replays the script over
+    # the existing websocket and can never pick up a fresh IAP assertion header.
+    # Only a full browser navigation does, and that navigation is exactly what
+    # IAP intercepts to run its own sign-in flow.
+    bg, fg, border = (
+        (GREEN, "#fff", GREEN) if primary else ("#fff", SECONDARY, "rgb(212,212,212)")
+    )
     st.markdown(
         f"""
-        <a href="/" target="_self">
+        <a href="{esc(url)}" target="_self" style="text-decoration:none;">
           <button style="width:100%;padding:0.5rem;margin-top:0.5rem;
-                         border-radius:8px;border:1px solid #ccc;
-                         background:{GREEN};color:#fff;font-weight:600;
+                         border-radius:6px;border:1px solid {border};
+                         background:{bg};color:{fg};font-weight:600;
+                         font-family:'Open Sans',Arial,sans-serif;font-size:14px;
                          cursor:pointer;">{esc(label)}</button>
         </a>
         """,
@@ -295,101 +288,41 @@ def _reload_button(label: str = "Retry sign-in") -> None:
     )
 
 
-def render_iap_login(provider) -> None:
+def render_landing() -> None:
+    """Landing page for a visitor with no verified identity yet.
+
+    There is no login form: the app never sees credentials. Identity comes from
+    the IAP-signed request header, so "Log in" just navigates the browser to the
+    IAP-protected URL and lets IAP run the Google sign-in flow.
+    """
     cfg = get_config()
+    provider = get_auth_provider()
+
+    error = None
     try:
         user = provider.authenticate_from_headers(st.context.headers)
     except AuthError as exc:
-        _, mid, _ = st.columns([1, 1.05, 1])
-        with mid:
-            _login_header(cfg)
-            st.error(f"Sign-in is unavailable: {exc}")
-            _reload_button()
-        return
+        user, error = None, str(exc)
 
-    if user is None:
-        _, mid, _ = st.columns([1, 1.05, 1])
-        with mid:
-            _login_header(cfg)
-            st.error(
-                "No verified identity was found on this request. This app "
-                "must be accessed through its Identity-Aware Proxy URL."
-            )
-            _reload_button("Start sign-in")
-        return
+    if user is not None:
+        st.session_state.user = user
+        st.rerun()
 
-    st.session_state.user = user
-    st.rerun()
-
-
-def render_credential_login() -> None:
-    cfg = get_config()
     _, mid, _ = st.columns([1, 1.05, 1])
     with mid:
-        _login_header(cfg)
-        with st.form("login"):
-            username = st.text_input("Email", key="login_email")
-            password = st.text_input("Password", type="password", key="login_password")
-            submitted = st.form_submit_button(
-                "Log in", type="primary", width="stretch"
-            )
+        _landing_header(cfg)
+        if error:
+            st.error(f"Sign-in is unavailable: {error}")
+        else:
             st.markdown(
-                f'<div style="text-align:center;font-size:13px;"><a href="#" '
-                f'style="color:{GREEN};">Forgot password?</a></div>',
+                '<div class="de-note" style="text-align:center;">Sign in with your '
+                "Google account through Identity-Aware Proxy to continue.</div>",
                 unsafe_allow_html=True,
             )
-
-        if submitted:
-            try:
-                user = get_auth_provider().authenticate(username.strip(), password)
-            except AuthError as exc:
-                st.error(f"Sign-in is unavailable: {exc}")
-                return
-            if user is None:
-                st.error("Incorrect email or password.")
-            else:
-                st.session_state.user = user
-                st.rerun()
-
-
-def render_oauth_login(provider) -> None:
-    cfg = get_config()
-    ss = st.session_state
-    result = interpret_callback(dict(st.query_params), ss.get("oauth_state"))
-
-    if result.kind == OAuthCallbackKind.EXCHANGE:
-        code = result.code
-        st.query_params.clear()
-        ss.oauth_state = None
-        try:
-            user = provider.complete_login(code)
-        except AuthError as exc:
-            st.error(f"Sign-in is unavailable: {exc}")
-        else:
-            if user is None:
-                st.error("Google sign-in was rejected. Please try again.")
-            else:
-                ss.user = user
-                st.rerun()
-    elif result.kind == OAuthCallbackKind.DENIED:
-        st.query_params.clear()
-        ss.oauth_state = None
-        st.error(f"Google sign-in was cancelled or denied ({result.error}).")
-    elif result.kind == OAuthCallbackKind.CSRF_MISMATCH:
-        st.query_params.clear()
-        ss.oauth_state = None
-        st.error("Your sign-in session expired. Please try again.")
-
-    _, mid, _ = st.columns([1, 1.05, 1])
-    with mid:
-        _login_header(cfg)
-        ss.setdefault("oauth_state", secrets.token_urlsafe(24))
-        try:
-            login_url = provider.get_login_url(ss.oauth_state)
-        except AuthError as exc:
-            st.error(f"Sign-in is unavailable: {exc}")
-            return
-        st.link_button("Log in with Google", login_url, type="primary", width="stretch")
+        _nav_button("Log in", provider.login_url())
+        _nav_button(
+            "Sign in as a different user", provider.restart_login_url(), primary=False
+        )
 
 
 @st.dialog("Discard unpublished edits?")
@@ -466,15 +399,15 @@ def render_toolbar(subtitle: str) -> None:
     with c_avatar:
         with st.popover(user.initials, help=user.display_name):
             st.markdown(f"**{esc(user.display_name)}**", unsafe_allow_html=True)
-            if not get_auth_provider().header_based and st.button(
-                "Log out", width="stretch"
-            ):
-                st.session_state.user = None
-                st.session_state.original_df = None
-                st.session_state.edits = {}
-                st.session_state.undo_stack, st.session_state.redo_stack = [], []
-                st.session_state.view = "editing"
-                st.rerun()
+            st.markdown(
+                '<div class="de-note">signed in through Identity-Aware Proxy</div>',
+                unsafe_allow_html=True,
+            )
+            # Signing out is IAP's to do — clearing st.session_state would just
+            # re-read the same still-valid assertion header on the next rerun.
+            _nav_button(
+                "Sign out", get_auth_provider().restart_login_url(), primary=False
+            )
 
     if st.session_state.export_error:
         st.error(st.session_state.export_error)
@@ -1216,7 +1149,7 @@ def main() -> None:
     inject_css()
 
     if st.session_state.user is None:
-        render_login()
+        render_landing()
         return
 
     try:

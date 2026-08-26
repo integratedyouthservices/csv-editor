@@ -11,12 +11,14 @@ app:
   subtitle: "sign in to edit the dataset"
 
 # ------------------------------------------------------------
-# AUTH — pick one: iap | gcloud_identity | google_oauth
-# (register more in providers/auth/__init__.py)
+# AUTH — iap only. (register more in providers/auth/__init__.py)
 #
-# Default is iap: the app trusts Google Cloud Identity-Aware Proxy and
-# expects to be deployed behind it (Cloud Run, App Engine, or GCE/GKE with
-# an IAP-protected backend). See README.md's "GCP deployment" section.
+# The app has no login form and never handles credentials: it trusts Google
+# Cloud Identity-Aware Proxy and expects to be deployed behind it (Cloud Run,
+# App Engine, or GCE/GKE with an IAP-protected backend). A visitor with no
+# verified identity gets a landing page whose "Log in" button navigates to the
+# IAP-protected URL, which is what starts IAP's own sign-in flow.
+# See README.md's "GCP deployment" section.
 # ------------------------------------------------------------
 auth:
   provider: iap
@@ -29,24 +31,12 @@ auth:
     audience_env: IAP_AUDIENCE
     # audience: "..."           # inline fallback (avoid committing)
 
-  gcloud_identity:
-    # Google Cloud Identity Platform (email+password sign-in).
-    # https://cloud.google.com/identity-platform/docs/use-rest-api
-    # Set the API key via env var GCP_IDENTITY_API_KEY (preferred)
-    # or inline here (not recommended for committed files).
-    api_key_env: GCP_IDENTITY_API_KEY
-    # api_key: "..."           # inline fallback (avoid committing)
-
-  google_oauth:
-    # Full OAuth authorization-code flow, run by this app itself.
-    # https://developers.google.com/identity/protocols/oauth2/web-server
-    client_id_env: GOOGLE_OAUTH_CLIENT_ID
-    client_secret_env: GOOGLE_OAUTH_CLIENT_SECRET
-    # client_id / client_secret: "..."   # inline fallback (avoid committing)
-    redirect_uri: https://<your-cloud-run-service>/   # must exactly match the
-                                                        # OAuth client's authorized
-                                                        # redirect URI in Google
-                                                        # Cloud Console
+    # Where the landing page's "Log in" button sends the browser. Must be the
+    # IAP-protected URL (the external HTTPS load balancer hostname). Defaults
+    # to "/", which is right whenever the app is only ever reached through IAP
+    # — set this only if a browser can land on the app some other way.
+    login_url_env: IAP_LOGIN_URL
+    # login_url: "https://<your-iap-protected-host>/"
 
 # ------------------------------------------------------------
 # STORAGE — pick one: local_csv | bigquery | gcs_parquet

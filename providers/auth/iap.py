@@ -16,7 +16,24 @@ class IAPAuthProvider(AuthProvider):
     """
 
     name = "iap"
-    header_based = True
+
+    def login_url(self) -> str:
+        env_name = self.settings.get("login_url_env")
+        url = (
+            os.environ.get(env_name) if env_name else None
+        ) or self.settings.get("login_url")
+        # "/" is correct whenever the app is only ever reached through IAP:
+        # the navigation itself is what IAP intercepts to start sign-in. It is
+        # only wrong if the browser got here some other way, which is what
+        # auth.iap.login_url / IAP_LOGIN_URL is for.
+        return url or "/"
+
+    def restart_login_url(self) -> str:
+        # Clears IAP's login cookie and re-enters the sign-in flow, so a stale
+        # or wrong-account session doesn't just get handed back.
+        # https://cloud.google.com/iap/docs/sessions-howto
+        url = self.login_url()
+        return f"{url}{'&' if '?' in url else '?'}gcp-iap-mode=CLEAR_LOGIN_COOKIE"
 
     def _audience(self) -> str:
         env_name = self.settings.get("audience_env")
@@ -34,12 +51,6 @@ class IAPAuthProvider(AuthProvider):
                 "https://cloud.google.com/iap/docs/signed-headers-howto)."
             )
         return audience
-
-    def authenticate(self, username: str, password: str) -> Optional[User]:
-        raise AuthError(
-            "iap authenticates via the IAP-signed request header, not "
-            "username/password."
-        )
 
     def authenticate_from_headers(self, headers: Any) -> Optional[User]:
         assertion = headers.get(_ASSERTION_HEADER)

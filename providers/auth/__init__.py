@@ -7,12 +7,6 @@ from providers.auth.base import User as User
 
 _REGISTRY: dict[str, Callable[[], type]] = {
     "iap": lambda: _import("providers.auth.iap", "IAPAuthProvider"),
-    "gcloud_identity": lambda: _import(
-        "providers.auth.gcloud_identity", "GcloudIdentityAuthProvider"
-    ),
-    "google_oauth": lambda: _import(
-        "providers.auth.google_oauth", "GoogleOAuthProvider"
-    ),
 }
 
 

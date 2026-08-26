@@ -12,7 +12,7 @@ You can also point the app at a different config file entirely by setting the en
 
 ```yaml
 app:        # titles shown in the UI
-auth:       # WHICH login provider + its settings
+auth:       # WHICH identity provider + its settings
 storage:    # WHERE the data lives + its settings
 dataset:    # display name + the 17 column definitions (editors + validation)
 ```
@@ -23,8 +23,8 @@ dataset:    # display name + the 17 column definitions (editors + validation)
 
 ```yaml
 app:
-  title: "Data Editor"                      # toolbar + login card title
-  subtitle: "sign in to edit the dataset"   # login card subtitle
+  title: "Data Editor"                      # toolbar + landing card title
+  subtitle: "sign in to edit the dataset"   # landing card subtitle
 ```
 
 Cosmetic only; safe to change anytime.
@@ -33,18 +33,16 @@ Cosmetic only; safe to change anytime.
 
 ## 2. `auth` — authentication
 
-### Switching providers
-
-One line selects the provider; each provider then reads only its own settings block (unused blocks can stay in the file as documentation):
+**This app has no login form.** It never sees a password, holds no user list, and cannot be signed into on its own — identity arrives as a signed header from Identity-Aware Proxy, and `iap` is the only registered auth provider:
 
 ```yaml
 auth:
-  provider: iap              # ← change this: iap | gcloud_identity | google_oauth
+  provider: iap              # the only registered value
 ```
 
-### `iap` — Identity-Aware Proxy (default)
+### `iap` — Identity-Aware Proxy (the only provider)
 
-Trusts Google Cloud IAP: the app must be deployed behind it, and every request already carries a signed identity assertion (`X-Goog-IAP-JWT-Assertion`) IAP verifies and attaches before the request reaches Streamlit. There's no login form — `authenticate_from_headers()` verifies the token's signature and audience (via `google-auth`, against Google's published JWKs) and reads the `email` claim.
+Trusts Google Cloud IAP: the app must be deployed behind it, and every request already carries a signed identity assertion (`X-Goog-IAP-JWT-Assertion`) IAP verifies and attaches before the request reaches Streamlit. `authenticate_from_headers()` verifies the token's signature and audience (via `google-auth`, against Google's published JWKs) and reads the `email` claim.
 
 ```yaml
 auth:
@@ -52,6 +50,8 @@ auth:
   iap:
     audience_env: IAP_AUDIENCE   # name of the env var holding the audience string
     # audience: "..."            # inline fallback — avoid committing this
+    login_url_env: IAP_LOGIN_URL # optional — see "The landing page" below
+    # login_url: "https://<your-iap-protected-host>/"
 ```
 
 ```bash
@@ -64,69 +64,38 @@ export IAP_AUDIENCE="/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID"
 - The audience format depends on the backend: `/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID` for an external HTTPS load balancer, `/projects/PROJECT_NUMBER/apps/PROJECT_ID` for App Engine. See https://cloud.google.com/iap/docs/signed-headers-howto.
 - **This is app-level defense in depth, not the access-control gate** — the actual gate is the **IAP-Secured Web App User** IAM role (`roles/iap.httpsResourceAccessor`), granted per user/group on the backend service in the Cloud Console. The app trusts whoever IAP already let through; it doesn't manage its own user list.
 - The backend the app runs on (e.g. Cloud Run) must **not** be reachable except through the IAP-fronted load balancer, or the header can be spoofed by anyone hitting it directly. See the README's "GCP deployment" section.
+- The verified email is what gets written to `changed_by` in the change log and `last_updated_by` in the audit metadata.
 - Requires `pip install google-auth` (already in `requirements.txt`).
 
-### `gcloud_identity` — Google Cloud Identity Platform (no fronting proxy)
+### The landing page
 
-Email + password sign-in via the Identity Toolkit REST API.
+A request with a valid assertion goes straight to the editor — no click, no screen. A request without one gets a landing page carrying two navigations (not Streamlit buttons: a rerun replays the script over the existing websocket and can never pick up a fresh header — only a real browser navigation can, and that navigation is what IAP intercepts):
 
-```yaml
-auth:
-  provider: gcloud_identity
-  gcloud_identity:
-    api_key_env: GCP_IDENTITY_API_KEY   # name of the env var holding the API key
-    # api_key: "AIza..."                # inline fallback — avoid committing this
-```
+| Button | Goes to |
+|---|---|
+| **Log in** | `login_url` — the IAP-protected URL, which starts IAP's Google sign-in flow |
+| **Sign in as a different user** | `login_url` + `?gcp-iap-mode=CLEAR_LOGIN_COOKIE` — clears IAP's login cookie first, for a stale or wrong-account session. Same URL behind **Sign out** in the avatar popover. See https://cloud.google.com/iap/docs/sessions-howto |
 
-Then set the key in the environment before launching:
+`login_url` defaults to `/`, which is correct whenever the app is only ever reachable through IAP — the browser is already on the protected host, so re-navigating re-enters sign-in. Set `IAP_LOGIN_URL` (or `auth.iap.login_url`) to the load balancer hostname only if a browser can land on the app some other way; `/` would loop there.
 
-```bash
-# Windows (PowerShell)
-$env:GCP_IDENTITY_API_KEY = "AIza..."
-# Linux/macOS
-export GCP_IDENTITY_API_KEY="AIza..."
-```
+A misconfiguration (missing audience) or an untrustworthy assertion shows its message on the same landing page rather than a blank error, so the Log in / Sign in as a different user buttons stay reachable.
 
-The API key comes from your Google Cloud project (Identity Platform → Application setup details). Users must exist in Identity Platform with email/password sign-in enabled. Wrong credentials show "Incorrect email or password"; a missing key or network problem shows a separate "Sign-in is unavailable" message so you can tell configuration issues apart from bad passwords.
+### Local development
 
-**Note:** the signed-in email is what gets written to `last_updated_by` in the audit metadata, so production should use real emails via `gcloud_identity`.
-
-### `google_oauth` — Google OAuth, run by this app (no fronting proxy)
-
-The app itself performs the full OAuth authorization-code flow: it renders a "Log in with Google" link, Google redirects the browser back with `?code&state`, and the app exchanges the code for an ID token directly. This is **not** the "trust a header from an external proxy" (IAP) pattern — there is no fronting proxy involved.
-
-```yaml
-auth:
-  provider: google_oauth
-  google_oauth:
-    client_id_env: GOOGLE_OAUTH_CLIENT_ID
-    client_secret_env: GOOGLE_OAUTH_CLIENT_SECRET
-    # client_id / client_secret: "..."     # inline fallback — avoid committing
-    redirect_uri: https://<your-cloud-run-service>/
-```
-
-```bash
-pip install google-auth
-export GOOGLE_OAUTH_CLIENT_ID="....apps.googleusercontent.com"
-export GOOGLE_OAUTH_CLIENT_SECRET="...."
-```
-
-- `redirect_uri` must **exactly** match an authorized redirect URI configured on the OAuth client in Google Cloud Console (Credentials → OAuth 2.0 Client IDs).
-- Requires an OAuth consent screen (Internal, for a Workspace-only deployment, or External). `openid`/`email`/`profile` are Google's non-sensitive scope bucket, so no app-verification review is required even for an External consent screen.
-- A rejected/cancelled login and a CSRF `state` mismatch both show a plain-language error and return to the login button; they don't crash the app.
-- **Multi-replica deployments (Cloud Run) must enable session affinity.** The CSRF `state` value round-trips through `st.session_state`, which lives in-process on whichever server instance handled the initial click; if the redirect-back lands on a *different* instance without session affinity, login fails unpredictably.
-- See the README's "GCP deployment" section for the end-to-end setup (consent screen, credentials, IAM, deploy).
+With `iap` the app stops at the landing page on a workstation — there's no IAP in front, so there's no identity and no form to fill in. To reach the editor locally, set `st.session_state.user` yourself (a `providers.auth.base.User`), e.g. via `streamlit.testing.v1.AppTest`, or run behind a real IAP deployment.
 
 ### Adding a new auth provider (e.g. Okta, Azure AD)
 
 No config-only path — it's ~20 lines of code, then config:
 
-1. Create `providers/auth/okta.py` subclassing `AuthProvider` (see `providers/auth/base.py` for the contract: `authenticate(username, password)` returns a `User` on success, `None` on bad credentials, raises `AuthError` for infrastructure failures).
+1. Create `providers/auth/okta.py` subclassing `AuthProvider` (see `providers/auth/base.py` for the contract: `authenticate_from_headers(headers)` returns a `User`, `None` when the request carries no identity at all, and raises `AuthError` when one is present but untrustworthy; `login_url()`/`restart_login_url()` say where the landing page's buttons point).
 2. Register it in `providers/auth/__init__.py`:
    ```python
    _REGISTRY["okta"] = lambda: _import("providers.auth.okta", "OktaAuthProvider")
    ```
 3. Add its settings block and set `auth.provider: okta` in `config.yaml`.
+
+The base class deliberately exposes **no** username/password or redirect-callback hook. A provider needing either would also need a login screen added back to `app.py`, which this branch does not have.
 
 ---
 
