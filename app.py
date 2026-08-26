@@ -278,6 +278,23 @@ def render_login() -> None:
         render_credential_login()
 
 
+def _reload_button(label: str = "Retry sign-in") -> None:
+    # st.rerun() replays the script over the existing connection and can't
+    # pick up a fresh IAP assertion header — only a real browser navigation
+    # does, which is what re-enters IAP's own sign-in flow if needed.
+    st.markdown(
+        f"""
+        <a href="/" target="_self">
+          <button style="width:100%;padding:0.5rem;margin-top:0.5rem;
+                         border-radius:8px;border:1px solid #ccc;
+                         background:{GREEN};color:#fff;font-weight:600;
+                         cursor:pointer;">{esc(label)}</button>
+        </a>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_iap_login(provider) -> None:
     cfg = get_config()
     try:
@@ -287,6 +304,7 @@ def render_iap_login(provider) -> None:
         with mid:
             _login_header(cfg)
             st.error(f"Sign-in is unavailable: {exc}")
+            _reload_button()
         return
 
     if user is None:
@@ -297,6 +315,7 @@ def render_iap_login(provider) -> None:
                 "No verified identity was found on this request. This app "
                 "must be accessed through its Identity-Aware Proxy URL."
             )
+            _reload_button("Start sign-in")
         return
 
     st.session_state.user = user
