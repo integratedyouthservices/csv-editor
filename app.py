@@ -425,23 +425,20 @@ def render_toolbar(subtitle: str) -> None:
     with c_avatar:
         with st.popover(user.initials, help=user.display_name):
             st.markdown(f"**{esc(user.display_name)}**", unsafe_allow_html=True)
-            if get_auth_provider().header_based:
-                # IAP re-authenticates from the request header on every
-                # rerun, so clearing session state alone would just log the
-                # same identity straight back in. IAP's own clear-cookie
-                # endpoint is the only real way to end the session (e.g. to
-                # switch accounts): https://cloud.google.com/iap/docs/faq
-                st.caption("Signed in via Identity-Aware Proxy.")
-                st.link_button(
-                    "Switch account", "/_gcp_iap/clear_login_cookie", width="stretch"
-                )
-            elif st.button("Log out", width="stretch"):
-                st.session_state.user = None
-                st.session_state.original_df = None
-                st.session_state.edits = {}
-                st.session_state.undo_stack, st.session_state.redo_stack = [], []
-                st.session_state.view = "editing"
-                st.rerun()
+            # Auth is IAP-only, so there is no local sign-out to offer: IAP
+            # re-authenticates from the request header on every rerun, and
+            # clearing session state alone would just log the same identity
+            # straight back in. Ending IAP's own session is the only real way
+            # to switch accounts -- restart_login_url() builds that URL from
+            # the configured login_url, so it still points at the external
+            # load balancer rather than assuming a same-origin path.
+            # https://cloud.google.com/iap/docs/sessions-howto
+            st.caption("Signed in via Identity-Aware Proxy.")
+            st.link_button(
+                "Switch account",
+                get_auth_provider().restart_login_url(),
+                width="stretch",
+            )
 
     if st.session_state.export_error:
         st.error(st.session_state.export_error)
