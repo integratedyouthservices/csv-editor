@@ -140,7 +140,25 @@ def row_number(df: pd.DataFrame, row_id: Any) -> int:
 
 
 def esc(text: Any) -> str:
-    return html.escape("" if text is None else str(text))
+    """HTML-escape a value for the hand-rolled markup, and encode any real
+    newlines as numeric character references.
+
+    The newline part is load-bearing, not cosmetic: st.markdown(
+    unsafe_allow_html=True) runs the string through a Markdown parser
+    before it ever reaches the DOM, and a blank line inside a raw-HTML
+    block *ends* that block — everything after it gets parsed as Markdown
+    prose instead. A single multi-paragraph cell would therefore shatter
+    the whole grid, dumping the rest of the table markup onto the page as
+    visible text (the 988 dataset has 105 such description cells; the
+    older CSV sample had none, which is why this stayed hidden).
+
+    &#10; keeps the emitted markup on one physical line while still
+    decoding back to a real newline in the DOM, so `cell.dataset.value`
+    hands the textarea editor the original text and multi-paragraph
+    values round-trip through an edit unchanged.
+    """
+    escaped = html.escape("" if text is None else str(text))
+    return escaped.replace("\r", "&#13;").replace("\n", "&#10;")
 
 
 # ------------------------------------------------------------------- css
@@ -704,14 +722,28 @@ def render_grid_script(autosize: bool) -> None:
         }
         function fitTwice() { fit(); P.requestAnimationFrame(fit); }
         fitTwice();
-        P.addEventListener('resize', fitTwice);
-        if (P.__deFitObserver) P.__deFitObserver.disconnect();
+        if (P.__deFitResize) P.removeEventListener('resize', P.__deFitResize);
+        P.__deFitResize = fitTwice;
+        P.addEventListener('resize', P.__deFitResize);
+        try { if (P.__deFitObserver) P.__deFitObserver.disconnect(); } catch (err) {}
         P.__deFitObserver = new P.MutationObserver(() => {
           P.clearTimeout(P.__deFitTimer);
           P.__deFitTimer = P.setTimeout(fitTwice, 80);
         });
         P.__deFitObserver.observe(doc.body, { childList: true, subtree: true });
-    """ if autosize else ""
+    """ if autosize else """
+        // Not the editing page. Tear the autosizer down rather than
+        // leaving it running: its callback belongs to a realm that is
+        // about to die, and --de-grid-h is still set to a height fitted
+        // for 290 rows, which this grid would inherit as dead space.
+        try { if (P.__deFitObserver) P.__deFitObserver.disconnect(); } catch (err) {}
+        P.__deFitObserver = null;
+        if (P.__deFitResize) {
+          P.removeEventListener('resize', P.__deFitResize);
+          P.__deFitResize = null;
+        }
+        doc.documentElement.style.removeProperty('--de-grid-h');
+    """
 
     st.iframe(
         f"""<script>
@@ -720,20 +752,28 @@ def render_grid_script(autosize: bool) -> None:
         // Keyboard shortcuts: Ctrl/Cmd+Z = undo, Ctrl/Cmd+Shift+Z or
         // Ctrl+Y = redo. Skipped while a cell editor / input has focus
         // so native text-field undo still works there.
-        if (!P.__deKeys) {{
-          P.__deKeys = true;
-          doc.addEventListener('keydown', (e) => {{
-            if (!(e.ctrlKey || e.metaKey)) return;
-            const k = e.key.toLowerCase();
-            if (k !== 'z' && k !== 'y') return;
-            const t = e.target;
-            if (t && t.closest && t.closest('input, textarea, [contenteditable="true"]')) return;
-            const wantRedo = k === 'y' || (k === 'z' && e.shiftKey);
-            const btn = [...doc.querySelectorAll('button')].find(b =>
-              b.textContent.trim().startsWith(wantRedo ? '↷' : '↶'));
-            if (btn && !btn.disabled) {{ e.preventDefault(); btn.click(); }}
-          }}, true);
-        }}
+        // Rebind on every run rather than guarding with a one-shot flag.
+        // Streamlit destroys this iframe -- and with it the realm these
+        // handlers close over -- whenever the view changes, so a listener
+        // installed by an earlier run stays in the parent's listener list
+        // but no longer fires. Parking the reference on the parent window
+        // (which outlives every run) lets this run unbind the stale one
+        // before installing a live replacement. A flag here is what left
+        // the review grid uneditable: its script saw the flag set by the
+        // editing page and skipped binding, deferring to a dead handler.
+        if (P.__deKeysHandler) doc.removeEventListener('keydown', P.__deKeysHandler, true);
+        P.__deKeysHandler = (e) => {{
+          if (!(e.ctrlKey || e.metaKey)) return;
+          const k = e.key.toLowerCase();
+          if (k !== 'z' && k !== 'y') return;
+          const t = e.target;
+          if (t && t.closest && t.closest('input, textarea, [contenteditable="true"]')) return;
+          const wantRedo = k === 'y' || (k === 'z' && e.shiftKey);
+          const btn = [...doc.querySelectorAll('button')].find(b =>
+            b.textContent.trim().startsWith(wantRedo ? '↷' : '↶'));
+          if (btn && !btn.disabled) {{ e.preventDefault(); btn.click(); }}
+        }};
+        doc.addEventListener('keydown', P.__deKeysHandler, true);
 
         function findBridgeInput() {{
           const wrap = doc.querySelector('div[class*="st-key-cell_bridge"]');
@@ -825,15 +865,15 @@ def render_grid_script(autosize: bool) -> None:
           if (ed.select) ed.select();
         }}
 
-        if (!P.__deTableBound) {{
-          P.__deTableBound = true;
-          doc.addEventListener('dblclick', (e) => {{
-            const cell = e.target.closest('.de-cell[data-editable="1"]');
-            if (!cell || cell.classList.contains('de-cell-pin')) return;
-            e.preventDefault();
-            openEditor(cell);
-          }});
-        }}
+        // Same rebind-don't-flag rule as the keydown handler above.
+        if (P.__deTableHandler) doc.removeEventListener('dblclick', P.__deTableHandler);
+        P.__deTableHandler = (e) => {{
+          const cell = e.target.closest('.de-cell[data-editable="1"]');
+          if (!cell || cell.classList.contains('de-cell-pin')) return;
+          e.preventDefault();
+          openEditor(cell);
+        }};
+        doc.addEventListener('dblclick', P.__deTableHandler);
         </script>""",
         height=1,
     )

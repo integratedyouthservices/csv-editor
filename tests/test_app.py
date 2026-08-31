@@ -13,6 +13,9 @@ from streamlit.testing.v1 import AppTest
 
 from providers.auth.base import User
 
+NL = chr(10)
+CR = chr(13)
+
 APP = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")
 
 
@@ -39,6 +42,84 @@ def test_login_success_and_failure():
     at.text_input(key="login_password").set_value("admin")
     at = at.button[0].set_value(True).run()
     assert at.session_state["user"] is not None
+
+
+def test_esc_encodes_newlines_so_markdown_cannot_split_the_grid():
+    """Regression: st.markdown(unsafe_allow_html=True) parses Markdown
+    before the HTML reaches the DOM, and a blank line inside a raw-HTML
+    block terminates that block -- one multi-paragraph cell used to
+    shatter the whole table onto the page as visible text."""
+    import html as _html
+
+    from app import esc
+
+    source = "para one" + NL + NL + 'para "two" & <three>'
+    out = esc(source)
+    assert NL not in out and CR not in out
+    assert "&#10;&#10;" in out
+    assert "&quot;two&quot;" in out and "&lt;three&gt;" in out
+    # the browser decodes it back, so the textarea editor still sees the
+    # original text and a round-tripped edit loses nothing
+    assert _html.unescape(out) == source
+
+
+def test_rendered_grid_is_a_single_unbroken_html_block():
+    """The real 988 rows carry newlines in 10 of the 17 columns; the
+    emitted grid markup must still be one physical line."""
+    at = fresh(user=_user())
+    assert not at.exception
+    # startswith, not "in": the injected <style> block also mentions
+    # the .de-grid-wrap selector
+    grid = [md.value for md in at.markdown
+            if md.value.startswith('<div class="de-grid-wrap"')]
+    assert len(grid) == 1
+    assert NL not in grid[0] and CR not in grid[0]
+    assert grid[0].count("<tr>") == 291          # 290 data rows + the header
+    assert "&#10;" in grid[0]                    # multi-paragraph cells survived
+
+
+def _grid_script(autosize):
+    """Capture the JS render_grid_script() hands to st.iframe."""
+    import streamlit as st
+
+    import app as app_module
+
+    captured = {}
+    original = st.iframe
+    st.iframe = lambda html, **kw: captured.setdefault("html", html)
+    try:
+        app_module.render_grid_script(autosize=autosize)
+    finally:
+        st.iframe = original
+    return captured["html"]
+
+
+def test_grid_script_rebinds_its_listeners_on_every_run():
+    """Regression: the handlers used to be installed behind one-shot
+    flags (P.__deTableBound / P.__deKeys). Streamlit destroys this iframe
+    -- and the realm the handlers close over -- on a view change, so the
+    review page saw the flag the editing page had set, skipped binding,
+    and deferred to a dead handler: its grid rendered but would not open
+    a cell editor."""
+    for autosize in (True, False):
+        js = _grid_script(autosize)
+        assert "__deTableBound" not in js and "__deKeys " not in js
+        assert "if (!P.__de" not in js          # no one-shot guards left
+        for event, ref in (("dblclick", "__deTableHandler"),
+                           ("keydown", "__deKeysHandler")):
+            assert f"removeEventListener('{event}', P.{ref}" in js
+            assert f"addEventListener('{event}', P.{ref}" in js
+
+
+def test_non_autosized_grid_releases_the_editing_pages_height():
+    """--de-grid-h is fitted to the 290-row editing grid; the review grid
+    inherits it as dead space unless the script clears it."""
+    review = _grid_script(False)
+    assert "removeProperty('--de-grid-h')" in review
+    assert "__deFitObserver = null" in review
+
+    editing = _grid_script(True)
+    assert "setProperty('--de-grid-h'" in editing
 
 
 def _user():
@@ -84,7 +165,7 @@ def test_editing_view_renders():
     at = fresh(user=_user())
     assert not at.exception
     body = " ".join(md.value for md in at.markdown)
-    assert "resources.csv" in body and "96 rows" in body.replace(",", "")
+    assert "geo_coded_988_data.parquet" in body and "290 rows" in body.replace(",", "")
 
 
 def test_clear_search_undo_redo_and_logout():

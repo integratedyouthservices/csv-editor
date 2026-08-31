@@ -59,16 +59,23 @@ auth:
     #   https://cloud.google.com/iap/docs/signed-headers-howto#verifying_the_jwt_payload
 
 # ------------------------------------------------------------
-# STORAGE — pick one: local_csv | bigquery | gcs_parquet
+# STORAGE — pick one: local_csv | local_parquet | bigquery | gcs_parquet
 # (register more in providers/storage/__init__.py)
 #
 # For the 988 GCP deployment: set provider: gcs_parquet below (or point
 # CSV_EDITOR_CONFIG at a separate deployment config file that does) — kept
-# as local_csv here so `streamlit run app.py` and the test suite work with
-# zero GCP setup. See README.md's "GCP deployment" section.
+# as local_parquet here so `streamlit run app.py` and the test suite work
+# with zero GCP setup, against the same parquet payload (and the same 17
+# columns) the GCS deployment reads. See README.md's "GCP deployment"
+# section.
 # ------------------------------------------------------------
 storage:
-  provider: local_csv
+  provider: local_parquet
+
+  local_parquet:
+    # Local twin of gcs_parquet.blob_path below — same dataset, on disk.
+    path: sample_data/geo_coded_988_data.parquet
+    id_column: null          # null → use file row order as the row id
 
   local_csv:
     path: sample_data/resources.csv
@@ -112,7 +119,7 @@ storage:
 # publish; format/type failures DO block publish.
 # ------------------------------------------------------------
 dataset:
-  display_name: resources.csv
+  display_name: geo_coded_988_data.parquet
   columns:
     # Editor type per column: text | textarea | enum | float
     # required-but-blank cells are flagged (amber) but do NOT block
@@ -150,7 +157,26 @@ dataset:
       label: PROVINCE_TERRITORY
       type: enum
       required: true
+      # Both spellings are valid in this dataset: the two-letter code is
+      # what the 988 parquet actually stores, the full name is what older
+      # CSV exports use. Codes first so the dropdown matches the data.
+      # CA / DC appear on international (non-Canadian) crisis lines.
       options:
+        - "AB"
+        - "BC"
+        - "CA"
+        - "DC"
+        - "MB"
+        - "NB"
+        - "NL"
+        - "NS"
+        - "NT"
+        - "NU"
+        - "ON"
+        - "PE"
+        - "QC"
+        - "SK"
+        - "YT"
         - Alberta
         - British Columbia
         - Manitoba

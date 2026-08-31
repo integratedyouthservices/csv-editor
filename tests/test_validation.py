@@ -29,7 +29,11 @@ def test_schema_has_17_columns():
     assert len(RULES) == 17
     assert RULES["service_category"].type == "enum"
     assert len(RULES["service_category"].options) == 9
-    assert len(RULES["province_territory"].options) == 13
+    # both spellings are valid: 15 codes (incl. CA/DC for international
+    # lines) + 13 full province/territory names
+    assert len(RULES["province_territory"].options) == 28
+    assert "ON" in RULES["province_territory"].options
+    assert "Ontario" in RULES["province_territory"].options
     assert RULES["description"].type == "textarea"
     assert RULES["latitude"].type == "float"
 
