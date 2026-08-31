@@ -5,6 +5,8 @@ from typing import Any, Callable
 from providers.storage.base import ROW_ID as ROW_ID
 from providers.storage.base import EditMap as EditMap
 from providers.storage.base import StorageError, StorageProvider
+from providers.storage.base import stamp_version as stamp_version
+from providers.storage.base import version_of as version_of
 
 _REGISTRY: dict[str, Callable[[], type]] = {
     "local_csv": lambda: _import(

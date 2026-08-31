@@ -20,7 +20,13 @@ from core.validation import (
     warnings_only,
 )
 from providers.auth import AuthError, create_auth_provider
-from providers.storage import ROW_ID, StorageError, create_storage_provider
+from providers.storage import (
+    ROW_ID,
+    StorageError,
+    create_storage_provider,
+    stamp_version,
+    version_of,
+)
 
 GREEN = "rgb(3,149,121)"
 GREEN_HOVER = "rgb(2,119,97)"
@@ -1006,6 +1012,14 @@ def publish_dialog(n_rows: int, n_cells: int) -> None:
         st.rerun()
     if c2.button("Yes, publish", type="primary", width="stretch"):
         provider = get_storage_provider()
+        # Catch a concurrent publish before the change log is written, so a
+        # losing publish doesn't leave the log describing edits that never
+        # reached the data. The write itself re-checks.
+        try:
+            provider.check_writable(st.session_state.original_df)
+        except StorageError as exc:
+            st.error(str(exc))
+            return
         edits = dict(st.session_state.edits)
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         data_columns = [c.name for c in cfg.columns]
@@ -1173,6 +1187,14 @@ def import_publish_dialog(final_df: pd.DataFrame) -> None:
         st.rerun()
     if c2.button("Yes, publish", type="primary", width="stretch"):
         provider = get_storage_provider()
+        # final_df was built from the uploaded file, so it carries no baseline
+        # of its own; the version to replace is the one this session loaded.
+        stamp_version(final_df, version_of(st.session_state.original_df))
+        try:
+            provider.check_writable(final_df)
+        except StorageError as exc:
+            st.error(str(exc))
+            return
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         data_columns = [c.name for c in cfg.columns]
         audit_records = rows_for_full_replace(final_df, data_columns, user.username, now)
