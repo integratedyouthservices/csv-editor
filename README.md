@@ -86,6 +86,9 @@ storage:
 ### Auth: Identity-Aware Proxy (the only provider)
 `iap` trusts Google Cloud IAP: the app must be deployed behind it (Cloud Run, App Engine, or GCE/GKE with an IAP-protected backend), and every request already carries a signed identity assertion IAP verifies before the request reaches Streamlit — no login form, no credentials handled by the app itself, and no in-app user list. A request without a verified identity gets the landing page and its "Log in" button, which navigates to the IAP-protected URL so IAP can run sign-in. See [CONFIG.md](CONFIG.md#iap--identity-aware-proxy-the-only-provider) for the config block.
 
+### Auth: Google Cloud IAP (alternative to Google OAuth)
+`gcp_iap` is for deployments that put the app behind an Identity-Aware Proxy load balancer instead: IAP handles Google sign-in and forwards a signed identity JWT, so the app never renders a login form. See [CONFIG.md](CONFIG.md#gcp_iap--google-cloud-identity-aware-proxy) for the config block and [IAP setup](#iap-setup-gcp_iap) below for the load-balancer/IAM steps.
+
 ### Storage: GCS parquet + BigQuery change log (988 deployment)
 `gcs_parquet` reads/writes a single parquet object on GCS (in-memory only — never a local temp file) and logs a structured before/after trail to BigQuery on every publish. See [CONFIG.md](CONFIG.md#gcs_parquet--gcs-parquet-file--bigquery-change-log-988-gcp-deployment) for the config block.
 
@@ -162,6 +165,26 @@ This section covers the `iap` + `gcs_parquet` provider pair. IAP isn't optional 
 4. The Cloud Run service itself must **not** be publicly invokable — grant `roles/run.invoker` only to the load balancer's service agent, not `allUsers`, so requests can't bypass IAP by hitting the Cloud Run URL directly.
 
 Full walkthrough: https://cloud.google.com/iap/docs/enabling-cloud-run
+
+### IAP setup (`gcp_iap`)
+
+Only needed if using `gcp_iap` instead of `google_oauth` — IAP replaces the OAuth consent screen/client above entirely.
+
+1. Deploy Cloud Run with public access off and ingress locked to the load balancer, so IAP can't be bypassed by hitting the service directly:
+   ```bash
+   gcloud run deploy 988-data-editor --source . --region us-central1 \
+     --no-allow-unauthenticated --ingress=internal-and-cloud-load-balancing
+   ```
+2. Put an external HTTPS Application Load Balancer with a serverless NEG in front of that Cloud Run service.
+3. Console → Security → Identity-Aware Proxy → enable IAP on that backend service.
+4. Grant `roles/iap.httpsResourceAccessor` ("IAP-secured Web App User"), scoped to the backend service, to the users/group who should have access.
+5. Get the audience string IAP signs the JWT for:
+   ```bash
+   PROJECT_NUMBER=$(gcloud projects describe PROJECT_ID --format='value(projectNumber)')
+   BACKEND_SERVICE_ID=$(gcloud compute backend-services describe SERVICE_NAME --global --format='value(id)')
+   echo "/projects/$PROJECT_NUMBER/global/backendServices/$BACKEND_SERVICE_ID"
+   ```
+6. Set `IAP_AUDIENCE` to that string, set `auth.provider: gcp_iap` in `config.yaml`, redeploy.
 
 ### Cloud Run deploy (example)
 

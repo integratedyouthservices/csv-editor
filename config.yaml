@@ -38,8 +38,18 @@ auth:
     login_url_env: IAP_LOGIN_URL
     # login_url: "https://<your-iap-protected-host>/"
 
+  gcp_iap:
+    # Google Cloud Identity-Aware Proxy — a load balancer in front of the
+    # app handles Google sign-in and forwards a signed identity JWT on
+    # every request; the app never renders a login form.
+    # https://cloud.google.com/iap/docs/concepts-overview
+    audience_env: IAP_AUDIENCE
+    # audience: "..."   # inline fallback (avoid committing)
+    #   Format: /projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID
+    #   https://cloud.google.com/iap/docs/signed-headers-howto#verifying_the_jwt_payload
+
 # ------------------------------------------------------------
-# STORAGE — pick one: local_csv | bigquery | gcs_parquet
+# STORAGE — pick one: local_csv | local_parquet | bigquery | gcs_parquet
 # (register more in providers/storage/__init__.py)
 #
 # Default is gcs_parquet for the 988 GCP deployment. local_csv is kept
@@ -93,7 +103,7 @@ storage:
 # publish; format/type failures DO block publish.
 # ------------------------------------------------------------
 dataset:
-  display_name: resources.csv
+  display_name: geo_coded_988_data.parquet
   columns:
     # Editor type per column: text | textarea | enum | float
     # required-but-blank cells are flagged (amber) but do NOT block
@@ -131,7 +141,26 @@ dataset:
       label: PROVINCE_TERRITORY
       type: enum
       required: true
+      # Both spellings are valid in this dataset: the two-letter code is
+      # what the 988 parquet actually stores, the full name is what older
+      # CSV exports use. Codes first so the dropdown matches the data.
+      # CA / DC appear on international (non-Canadian) crisis lines.
       options:
+        - "AB"
+        - "BC"
+        - "CA"
+        - "DC"
+        - "MB"
+        - "NB"
+        - "NL"
+        - "NS"
+        - "NT"
+        - "NU"
+        - "ON"
+        - "PE"
+        - "QC"
+        - "SK"
+        - "YT"
         - Alberta
         - British Columbia
         - Manitoba

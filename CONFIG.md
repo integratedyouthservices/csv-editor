@@ -71,10 +71,7 @@ export IAP_AUDIENCE="/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID"
 
 A request with a valid assertion goes straight to the editor — no click, no screen. A request without one gets a landing page carrying two navigations (not Streamlit buttons: a rerun replays the script over the existing websocket and can never pick up a fresh header — only a real browser navigation can, and that navigation is what IAP intercepts):
 
-| Button | Goes to |
-|---|---|
-| **Log in** | `login_url` — the IAP-protected URL, which starts IAP's Google sign-in flow |
-| **Sign in as a different user** | `login_url` + `?gcp-iap-mode=CLEAR_LOGIN_COOKIE` — clears IAP's login cookie first, for a stale or wrong-account session. Same URL behind **Sign out** in the avatar popover. See https://cloud.google.com/iap/docs/sessions-howto |
+The app itself performs the full OAuth authorization-code flow: it renders a "Log in with Google" link, Google redirects the browser back with `?code&state`, and the app exchanges the code for an ID token directly. This is **not** the "trust a header from an external proxy" pattern — there is no fronting proxy involved. If the app instead sits behind an Identity-Aware Proxy load balancer, use `gcp_iap` below.
 
 `login_url` defaults to `/`, which is correct whenever the app is only ever reachable through IAP — the browser is already on the protected host, so re-navigating re-enters sign-in. Set `IAP_LOGIN_URL` (or `auth.iap.login_url`) to the load balancer hostname only if a browser can land on the app some other way; `/` would loop there.
 
@@ -83,6 +80,28 @@ A misconfiguration (missing audience) or an untrustworthy assertion shows its me
 ### Local development
 
 With `iap` the app stops at the landing page on a workstation — there's no IAP in front, so there's no identity and no form to fill in. To reach the editor locally, set `st.session_state.user` yourself (a `providers.auth.base.User`), e.g. via `streamlit.testing.v1.AppTest`, or run behind a real IAP deployment.
+
+### `gcp_iap` — Google Cloud Identity-Aware Proxy
+
+For deployments that put IAP in front of the app (e.g. Cloud Run behind an external HTTPS load balancer with IAP enabled). IAP itself handles the Google sign-in; the app never renders a login form — it just reads and verifies the signed identity JWT (`X-Goog-IAP-JWT-Assertion`) IAP adds to every request. This *is* the "trust a header from an external proxy" pattern `google_oauth` above explicitly isn't — safe here only because the JWT is cryptographically verified against Google's IAP-specific public keys and a specific audience, not merely read off the header.
+
+```yaml
+auth:
+  provider: gcp_iap
+  gcp_iap:
+    audience_env: IAP_AUDIENCE
+    # audience: "..."   # inline fallback — avoid committing
+```
+
+```bash
+pip install google-auth
+export IAP_AUDIENCE="/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID"
+```
+
+- `audience` must match exactly what IAP signs the JWT for. For the typical Cloud Run + external HTTPS load balancer setup this is `/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID` — see [Securing your app with signed headers](https://cloud.google.com/iap/docs/signed-headers-howto#verifying_the_jwt_payload) for how to look up the project number and backend service ID.
+- **The app must actually be unreachable except through IAP.** This provider only trusts the signed JWT (never the plaintext `X-Goog-Authenticated-User-*` headers IAP also sets), but that protection is void if the backend can be reached directly, bypassing the load balancer — e.g. a Cloud Run service with public ingress. Restrict ingress to the load balancer (`--ingress=internal-and-cloud-load-balancing` for Cloud Run) so IAP can't be routed around.
+- "Log out" isn't meaningful from inside the app — IAP re-authenticates from the header on every request, so clearing the app's own session just logs the same identity straight back in. The avatar menu instead links to IAP's own [`/_gcp_iap/clear_login_cookie`](https://cloud.google.com/iap/docs/faq) endpoint, which is IAP's supported way to end the session (e.g. to switch Google accounts).
+- IAP is set up at the load balancer / IAM level (enabling IAP, restricting ingress, granting access), not in this app — see the README's ["IAP setup"](README.md#iap-setup-gcp_iap) for the ordered steps.
 
 ### Adding a new auth provider (e.g. Okta, Azure AD)
 

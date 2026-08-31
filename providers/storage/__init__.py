@@ -10,6 +10,9 @@ _REGISTRY: dict[str, Callable[[], type]] = {
     "local_csv": lambda: _import(
         "providers.storage.local_csv", "LocalCsvStorageProvider"
     ),
+    "local_parquet": lambda: _import(
+        "providers.storage.local_parquet", "LocalParquetStorageProvider"
+    ),
     "bigquery": lambda: _import(
         "providers.storage.bigquery", "BigQueryStorageProvider"
     ),

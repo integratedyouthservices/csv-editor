@@ -113,7 +113,25 @@ def row_number(df: pd.DataFrame, row_id: Any) -> int:
 
 
 def esc(text: Any) -> str:
-    return html.escape("" if text is None else str(text))
+    """HTML-escape a value for the hand-rolled markup, and encode any real
+    newlines as numeric character references.
+
+    The newline part is load-bearing, not cosmetic: st.markdown(
+    unsafe_allow_html=True) runs the string through a Markdown parser
+    before it ever reaches the DOM, and a blank line inside a raw-HTML
+    block *ends* that block — everything after it gets parsed as Markdown
+    prose instead. A single multi-paragraph cell would therefore shatter
+    the whole grid, dumping the rest of the table markup onto the page as
+    visible text (the 988 dataset has 105 such description cells; the
+    older CSV sample had none, which is why this stayed hidden).
+
+    &#10; keeps the emitted markup on one physical line while still
+    decoding back to a real newline in the DOM, so `cell.dataset.value`
+    hands the textarea editor the original text and multi-paragraph
+    values round-trip through an edit unchanged.
+    """
+    escaped = html.escape("" if text is None else str(text))
+    return escaped.replace("\r", "&#13;").replace("\n", "&#10;")
 
 
 def inject_css() -> None:
@@ -266,28 +284,6 @@ def _landing_header(cfg: AppConfig) -> None:
     )
 
 
-def _nav_button(label: str, url: str, primary: bool = True) -> None:
-    # A real anchor, not st.button + st.rerun(): a rerun replays the script over
-    # the existing websocket and can never pick up a fresh IAP assertion header.
-    # Only a full browser navigation does, and that navigation is exactly what
-    # IAP intercepts to run its own sign-in flow.
-    bg, fg, border = (
-        (GREEN, "#fff", GREEN) if primary else ("#fff", SECONDARY, "rgb(212,212,212)")
-    )
-    st.markdown(
-        f"""
-        <a href="{esc(url)}" target="_self" style="text-decoration:none;">
-          <button style="width:100%;padding:0.5rem;margin-top:0.5rem;
-                         border-radius:6px;border:1px solid {border};
-                         background:{bg};color:{fg};font-weight:600;
-                         font-family:'Open Sans',Arial,sans-serif;font-size:14px;
-                         cursor:pointer;">{esc(label)}</button>
-        </a>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def render_landing() -> None:
     """Landing page for a visitor with no verified identity yet.
 
@@ -312,17 +308,47 @@ def render_landing() -> None:
     with mid:
         _landing_header(cfg)
         if error:
+            # A header was there but could not be trusted (bad signature,
+            # wrong audience, IAP misconfigured). Say so rather than offer a
+            # Log in button that would land the visitor straight back here.
             st.error(f"Sign-in is unavailable: {error}")
-        else:
-            st.markdown(
-                '<div class="de-note" style="text-align:center;">Sign in with your '
-                "Google account through Identity-Aware Proxy to continue.</div>",
-                unsafe_allow_html=True,
-            )
-        _nav_button("Log in", provider.login_url())
-        _nav_button(
-            "Sign in as a different user", provider.restart_login_url(), primary=False
+            return
+        st.link_button(
+            "Log in with Google", provider.login_url(), type="primary", width="stretch"
         )
+
+
+def render_header_login(provider) -> None:
+    """Header-based providers (e.g. Google Cloud IAP): identity arrives
+    already verified on the request headers of the session that opened the
+    app -- there's no form to submit and no redirect to send the browser
+    on, so this just reads the identity and, if present, logs it straight
+    in.
+    """
+    cfg = get_config()
+    try:
+        user = provider.authenticate_from_headers(st.context.headers)
+    except AuthError as exc:
+        st.error(f"Sign-in is unavailable: {exc}")
+        return
+
+    if user is not None:
+        st.session_state.user = user
+        st.rerun()
+        return
+
+    _, mid, _ = st.columns([1, 1.05, 1])
+    with mid:
+        _landing_header(cfg)
+        st.error(
+            "This app must be accessed through its Identity-Aware Proxy "
+            "URL. If you're already doing that and still see this, "
+            "contact your administrator -- IAP isn't passing a valid "
+            "identity header."
+        )
+
+
+# --------------------------------------------------------------- toolbar
 
 
 @st.dialog("Discard unpublished edits?")
@@ -399,15 +425,23 @@ def render_toolbar(subtitle: str) -> None:
     with c_avatar:
         with st.popover(user.initials, help=user.display_name):
             st.markdown(f"**{esc(user.display_name)}**", unsafe_allow_html=True)
-            st.markdown(
-                '<div class="de-note">signed in through Identity-Aware Proxy</div>',
-                unsafe_allow_html=True,
-            )
-            # Signing out is IAP's to do — clearing st.session_state would just
-            # re-read the same still-valid assertion header on the next rerun.
-            _nav_button(
-                "Sign out", get_auth_provider().restart_login_url(), primary=False
-            )
+            if get_auth_provider().header_based:
+                # IAP re-authenticates from the request header on every
+                # rerun, so clearing session state alone would just log the
+                # same identity straight back in. IAP's own clear-cookie
+                # endpoint is the only real way to end the session (e.g. to
+                # switch accounts): https://cloud.google.com/iap/docs/faq
+                st.caption("Signed in via Identity-Aware Proxy.")
+                st.link_button(
+                    "Switch account", "/_gcp_iap/clear_login_cookie", width="stretch"
+                )
+            elif st.button("Log out", width="stretch"):
+                st.session_state.user = None
+                st.session_state.original_df = None
+                st.session_state.edits = {}
+                st.session_state.undo_stack, st.session_state.redo_stack = [], []
+                st.session_state.view = "editing"
+                st.rerun()
 
     if st.session_state.export_error:
         st.error(st.session_state.export_error)
@@ -555,33 +589,58 @@ def render_grid_script(autosize: bool) -> None:
         }
         function fitTwice() { fit(); P.requestAnimationFrame(fit); }
         fitTwice();
-        P.addEventListener('resize', fitTwice);
-        if (P.__deFitObserver) P.__deFitObserver.disconnect();
+        if (P.__deFitResize) P.removeEventListener('resize', P.__deFitResize);
+        P.__deFitResize = fitTwice;
+        P.addEventListener('resize', P.__deFitResize);
+        try { if (P.__deFitObserver) P.__deFitObserver.disconnect(); } catch (err) {}
         P.__deFitObserver = new P.MutationObserver(() => {
           P.clearTimeout(P.__deFitTimer);
           P.__deFitTimer = P.setTimeout(fitTwice, 80);
         });
         P.__deFitObserver.observe(doc.body, { childList: true, subtree: true });
-    """ if autosize else ""
+    """ if autosize else """
+        // Not the editing page. Tear the autosizer down rather than
+        // leaving it running: its callback belongs to a realm that is
+        // about to die, and --de-grid-h is still set to a height fitted
+        // for 290 rows, which this grid would inherit as dead space.
+        try { if (P.__deFitObserver) P.__deFitObserver.disconnect(); } catch (err) {}
+        P.__deFitObserver = null;
+        if (P.__deFitResize) {
+          P.removeEventListener('resize', P.__deFitResize);
+          P.__deFitResize = null;
+        }
+        doc.documentElement.style.removeProperty('--de-grid-h');
+    """
 
     st.iframe(
         f"""<script>
         const P = window.parent, doc = P.document;
         {autosizer}
-        if (!P.__deKeys) {{
-          P.__deKeys = true;
-          doc.addEventListener('keydown', (e) => {{
-            if (!(e.ctrlKey || e.metaKey)) return;
-            const k = e.key.toLowerCase();
-            if (k !== 'z' && k !== 'y') return;
-            const t = e.target;
-            if (t && t.closest && t.closest('input, textarea, [contenteditable="true"]')) return;
-            const wantRedo = k === 'y' || (k === 'z' && e.shiftKey);
-            const btn = [...doc.querySelectorAll('button')].find(b =>
-              b.textContent.trim().startsWith(wantRedo ? '↷' : '↶'));
-            if (btn && !btn.disabled) {{ e.preventDefault(); btn.click(); }}
-          }}, true);
-        }}
+        // Keyboard shortcuts: Ctrl/Cmd+Z = undo, Ctrl/Cmd+Shift+Z or
+        // Ctrl+Y = redo. Skipped while a cell editor / input has focus
+        // so native text-field undo still works there.
+        // Rebind on every run rather than guarding with a one-shot flag.
+        // Streamlit destroys this iframe -- and with it the realm these
+        // handlers close over -- whenever the view changes, so a listener
+        // installed by an earlier run stays in the parent's listener list
+        // but no longer fires. Parking the reference on the parent window
+        // (which outlives every run) lets this run unbind the stale one
+        // before installing a live replacement. A flag here is what left
+        // the review grid uneditable: its script saw the flag set by the
+        // editing page and skipped binding, deferring to a dead handler.
+        if (P.__deKeysHandler) doc.removeEventListener('keydown', P.__deKeysHandler, true);
+        P.__deKeysHandler = (e) => {{
+          if (!(e.ctrlKey || e.metaKey)) return;
+          const k = e.key.toLowerCase();
+          if (k !== 'z' && k !== 'y') return;
+          const t = e.target;
+          if (t && t.closest && t.closest('input, textarea, [contenteditable="true"]')) return;
+          const wantRedo = k === 'y' || (k === 'z' && e.shiftKey);
+          const btn = [...doc.querySelectorAll('button')].find(b =>
+            b.textContent.trim().startsWith(wantRedo ? '↷' : '↶'));
+          if (btn && !btn.disabled) {{ e.preventDefault(); btn.click(); }}
+        }};
+        doc.addEventListener('keydown', P.__deKeysHandler, true);
 
         function findBridgeInput() {{
           const wrap = doc.querySelector('div[class*="st-key-cell_bridge"]');
@@ -673,15 +732,15 @@ def render_grid_script(autosize: bool) -> None:
           if (ed.select) ed.select();
         }}
 
-        if (!P.__deTableBound) {{
-          P.__deTableBound = true;
-          doc.addEventListener('dblclick', (e) => {{
-            const cell = e.target.closest('.de-cell[data-editable="1"]');
-            if (!cell || cell.classList.contains('de-cell-pin')) return;
-            e.preventDefault();
-            openEditor(cell);
-          }});
-        }}
+        // Same rebind-don't-flag rule as the keydown handler above.
+        if (P.__deTableHandler) doc.removeEventListener('dblclick', P.__deTableHandler);
+        P.__deTableHandler = (e) => {{
+          const cell = e.target.closest('.de-cell[data-editable="1"]');
+          if (!cell || cell.classList.contains('de-cell-pin')) return;
+          e.preventDefault();
+          openEditor(cell);
+        }};
+        doc.addEventListener('dblclick', P.__deTableHandler);
         </script>""",
         height=1,
     )

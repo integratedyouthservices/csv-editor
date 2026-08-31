@@ -4,6 +4,8 @@ PyYAML>=6.0
 requests>=2.31            # google-auth's HTTP transport (iap token verification)
 google-auth>=2.30         # iap auth provider
 PyJWT[crypto]>=2.8        # iap auth provider — google-auth needs this to parse JWK-format certs
+requests>=2.31            # gcloud_identity + google_oauth auth providers
+pyarrow>=15.0             # local_parquet (default) + gcs_parquet storage providers
 
 # storage.provider = gcs_parquet (default) — change-log audit trail is a
 # BigQuery table, so bigquery deps are required alongside the GCS ones.
@@ -12,5 +14,8 @@ db-dtypes>=1.2
 google-cloud-storage>=2.16
 pyarrow>=15.0
 
-# Optional — only needed when storage.provider = bigquery instead
-# (already covered above when using the gcs_parquet default)
+# Optional — only needed when storage.provider = gcs_parquet
+# google-cloud-storage>=2.16
+
+# Optional — only needed when auth.provider = google_oauth OR gcp_iap
+# google-auth>=2.30
