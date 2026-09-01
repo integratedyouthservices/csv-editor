@@ -73,6 +73,9 @@ def init_state() -> None:
     ss.setdefault("import_edits", {})
     ss.setdefault("export_ready", None)
     ss.setdefault("export_error", None)
+    ss.setdefault("publish_busy", False)
+    ss.setdefault("publish_blocked", False)
+    ss.setdefault("publish_error", None)
 
 
 def bump_grid() -> None:
@@ -195,6 +198,13 @@ def inject_css() -> None:
         }}
         div.stButton > button {{ border-radius: 6px; }}
         div.stButton > button p {{ white-space: nowrap; }}
+        @keyframes de-spin {{ to {{ transform: rotate(360deg); }} }}
+        div[class*="st-key-publish_go_busy"] button::before {{
+            content: ""; display: inline-block; flex: none;
+            width: 13px; height: 13px; margin-right: 8px; border-radius: 50%;
+            border: 2px solid rgb(212,212,212); border-top-color: {MUTED};
+            animation: de-spin .7s linear infinite;
+        }}
         div[data-testid="stTextInput"] div[data-baseweb="input"] {{ border-radius: 6px; }}
         div[data-testid="stTextInput"] div[data-baseweb="input"]:focus-within {{
             border-color: {GREEN}; box-shadow: 0 0 0 1px {GREEN};
@@ -928,6 +938,7 @@ def render_review() -> None:
             disabled=bool(errors) or n_cells == 0,
             help="Fix invalid cells to enable publishing" if errors else None,
         ):
+            reset_publish_gate()
             publish_dialog(n_rows, n_cells)
 
     if n_cells == 0:
@@ -993,6 +1004,48 @@ def render_review() -> None:
         )
 
 
+def reset_publish_gate() -> None:
+    """Clear the confirm-button gate so a freshly opened dialog can publish."""
+    st.session_state.publish_busy = False
+    st.session_state.publish_blocked = False
+    st.session_state.publish_error = None
+
+
+def publish_gate() -> bool:
+    """Render the Cancel / Yes, publish row and say whether to publish now.
+
+    The first click only flips the gate to busy and reruns the dialog, so the
+    disabled, spinning button paints before the write blocks the script. The
+    button stays disabled after a failure, so a failed publish can't be
+    double-submitted.
+    """
+    busy = st.session_state.publish_busy
+    c1, c2 = st.columns(2)
+    if c1.button("Cancel", width="stretch", disabled=busy):
+        st.rerun()
+    clicked = c2.button(
+        "Yes, publish",
+        type="primary",
+        width="stretch",
+        disabled=busy or st.session_state.publish_blocked,
+        key="publish_go_busy" if busy else "publish_go",
+    )
+    if st.session_state.publish_error:
+        st.error(st.session_state.publish_error)
+    if clicked:
+        st.session_state.publish_busy = True
+        st.rerun(scope="fragment")
+    return busy
+
+
+def fail_publish(message: str) -> None:
+    """Stop the spinner, keep the button disabled, show why. Does not return."""
+    st.session_state.publish_error = message
+    st.session_state.publish_busy = False
+    st.session_state.publish_blocked = True
+    st.rerun(scope="fragment")
+
+
 @st.dialog("Publish these changes?")
 def publish_dialog(n_rows: int, n_cells: int) -> None:
     cfg = get_config()
@@ -1007,46 +1060,43 @@ def publish_dialog(n_rows: int, n_cells: int) -> None:
         "records who changed what and when</div>",
         unsafe_allow_html=True,
     )
-    c1, c2 = st.columns(2)
-    if c1.button("Cancel", width="stretch"):
-        st.rerun()
-    if c2.button("Yes, publish", type="primary", width="stretch"):
-        provider = get_storage_provider()
-        # Catch a concurrent publish before the change log is written, so a
-        # losing publish doesn't leave the log describing edits that never
-        # reached the data. The write itself re-checks.
-        try:
-            provider.check_writable(st.session_state.original_df)
-        except StorageError as exc:
-            st.error(str(exc))
-            return
-        edits = dict(st.session_state.edits)
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        data_columns = [c.name for c in cfg.columns]
-        audit_records = rows_for_edits(
-            st.session_state.original_df, edits, data_columns, user.username, now
-        )
-        outcome = publish_with_audit(
-            provider,
-            lambda: provider.apply_edits(st.session_state.original_df, edits),
-            metadata={"last_updated_at": now, "last_updated_by": user.username},
-            audit_records=audit_records,
-        )
-        if not outcome.ok:
-            st.error(outcome.blocking_error)
-            return
-        st.session_state.original_df = df_with_edits(st.session_state.original_df)
-        st.session_state.edits = {}
-        st.session_state.undo_stack, st.session_state.redo_stack = [], []
-        st.session_state.view = "editing"
-        st.session_state.just_published = (
-            f"Published {n_cells} cell{'s' if n_cells != 1 else ''} across "
-            f"{n_rows} row{'s' if n_rows != 1 else ''}."
-        )
-        if outcome.audit_warning:
-            st.session_state.audit_warning = outcome.audit_warning
-        bump_grid()
-        st.rerun()
+    if not publish_gate():
+        return
+
+    provider = get_storage_provider()
+    # Catch a concurrent publish before the change log is written, so a
+    # losing publish doesn't leave the log describing edits that never
+    # reached the data. The write itself re-checks.
+    try:
+        provider.check_writable(st.session_state.original_df)
+    except StorageError as exc:
+        fail_publish(str(exc))
+    edits = dict(st.session_state.edits)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    data_columns = [c.name for c in cfg.columns]
+    audit_records = rows_for_edits(
+        st.session_state.original_df, edits, data_columns, user.username, now
+    )
+    outcome = publish_with_audit(
+        provider,
+        lambda: provider.apply_edits(st.session_state.original_df, edits),
+        metadata={"last_updated_at": now, "last_updated_by": user.username},
+        audit_records=audit_records,
+    )
+    if not outcome.ok:
+        fail_publish(outcome.blocking_error)
+    st.session_state.original_df = df_with_edits(st.session_state.original_df)
+    st.session_state.edits = {}
+    st.session_state.undo_stack, st.session_state.redo_stack = [], []
+    st.session_state.view = "editing"
+    st.session_state.just_published = (
+        f"Published {n_cells} cell{'s' if n_cells != 1 else ''} across "
+        f"{n_rows} row{'s' if n_rows != 1 else ''}."
+    )
+    if outcome.audit_warning:
+        st.session_state.audit_warning = outcome.audit_warning
+    bump_grid()
+    st.rerun()
 
 
 def render_import_upload() -> None:
@@ -1155,6 +1205,7 @@ def render_import_review() -> None:
             disabled=bool(errors),
             help="Fix invalid cells to enable publishing" if errors else None,
         ):
+            reset_publish_gate()
             import_publish_dialog(display_df)
 
     row_ids = list(display_df.index)
@@ -1182,44 +1233,41 @@ def import_publish_dialog(final_df: pd.DataFrame) -> None:
         "insert in the change log</div>",
         unsafe_allow_html=True,
     )
-    c1, c2 = st.columns(2)
-    if c1.button("Cancel", width="stretch"):
-        st.rerun()
-    if c2.button("Yes, publish", type="primary", width="stretch"):
-        provider = get_storage_provider()
-        # final_df was built from the uploaded file, so it carries no baseline
-        # of its own; the version to replace is the one this session loaded.
-        stamp_version(final_df, version_of(st.session_state.original_df))
-        try:
-            provider.check_writable(final_df)
-        except StorageError as exc:
-            st.error(str(exc))
-            return
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        data_columns = [c.name for c in cfg.columns]
-        audit_records = rows_for_full_replace(final_df, data_columns, user.username, now)
-        outcome = publish_with_audit(
-            provider,
-            lambda: provider.replace_all(final_df),
-            metadata={},
-            audit_records=audit_records,
-        )
-        if not outcome.ok:
-            st.error(outcome.blocking_error)
-            return
-        st.session_state.original_df = final_df
-        st.session_state.import_df = None
-        st.session_state.import_edits = {}
-        st.session_state.edits = {}
-        st.session_state.undo_stack, st.session_state.redo_stack = [], []
-        st.session_state.view = "editing"
-        st.session_state.just_published = (
-            f"Imported and published {n_rows:,} row{'s' if n_rows != 1 else ''}."
-        )
-        if outcome.audit_warning:
-            st.session_state.audit_warning = outcome.audit_warning
-        bump_grid()
-        st.rerun()
+    if not publish_gate():
+        return
+
+    provider = get_storage_provider()
+    # final_df was built from the uploaded file, so it carries no baseline
+    # of its own; the version to replace is the one this session loaded.
+    stamp_version(final_df, version_of(st.session_state.original_df))
+    try:
+        provider.check_writable(final_df)
+    except StorageError as exc:
+        fail_publish(str(exc))
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    data_columns = [c.name for c in cfg.columns]
+    audit_records = rows_for_full_replace(final_df, data_columns, user.username, now)
+    outcome = publish_with_audit(
+        provider,
+        lambda: provider.replace_all(final_df),
+        metadata={},
+        audit_records=audit_records,
+    )
+    if not outcome.ok:
+        fail_publish(outcome.blocking_error)
+    st.session_state.original_df = final_df
+    st.session_state.import_df = None
+    st.session_state.import_edits = {}
+    st.session_state.edits = {}
+    st.session_state.undo_stack, st.session_state.redo_stack = [], []
+    st.session_state.view = "editing"
+    st.session_state.just_published = (
+        f"Imported and published {n_rows:,} row{'s' if n_rows != 1 else ''}."
+    )
+    if outcome.audit_warning:
+        st.session_state.audit_warning = outcome.audit_warning
+    bump_grid()
+    st.rerun()
 
 
 def main() -> None:
