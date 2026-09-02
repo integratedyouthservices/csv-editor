@@ -150,7 +150,28 @@ def inject_css() -> None:
         @import url('https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,400;0,600;1,400&display=swap');
         html, body, [class*="css"], .stApp {{ font-family: 'Open Sans', Arial, sans-serif; }}
         .stApp {{ background: rgb(241,239,234); }}
-        header[data-testid="stHeader"] {{ display: none; }}
+        /* Streamlit disables *every* widget whenever the websocket is not
+           CONNECTED, so a routine reconnect greys out the whole toolbar --
+           Export, Import, Publish -- for about a second. The status widget
+           is the only thing that tells a user "reconnecting" rather than
+           "this button is broken", so the header stays in the DOM to carry
+           it and only the rest of its chrome is hidden. It cannot be
+           display:none: the status widget lives inside it and would go with
+           it. The header is position:absolute and would otherwise overlay
+           the app's own toolbar row, so it is collapsed to zero height and
+           made click-through, and the status widget is re-pinned to the
+           bottom-right corner where it can't cover anything. */
+        header[data-testid="stHeader"] {{
+            background: transparent; height: 0; min-height: 0; pointer-events: none;
+        }}
+        header[data-testid="stHeader"] [data-testid="stToolbarActions"],
+        header[data-testid="stHeader"] [data-testid="stAppDeployButton"],
+        header[data-testid="stHeader"] [data-testid="stMainMenu"],
+        header[data-testid="stHeader"] [data-testid="stDecoration"] {{ display: none; }}
+        [data-testid="stStatusWidget"] {{
+            position: fixed; right: 16px; bottom: 16px; z-index: 9999;
+            pointer-events: auto;
+        }}
         .block-container {{ padding-top: 1.5rem; max-width: 100%; padding-bottom: 0.5rem; }}
 
         .de-card {{
@@ -193,10 +214,20 @@ def inject_css() -> None:
         div.stButton > button[kind="primary"]:hover {{
             background: {GREEN_HOVER}; border-color: {GREEN_HOVER};
         }}
+        /* Faded green rather than the old grey-and-dashed-border treatment.
+           A button can be disabled for a second at a time through no fault
+           of the user's (see the header comment above), and the dashed
+           border read as "broken" where a fade reads as "not right now".
+           The transition delay is what makes a short connection blip almost
+           invisible: transitions only run on *changes*, so a button that is
+           genuinely disabled when the page paints still shows up disabled
+           immediately -- only a mid-life toggle waits out the delay. */
         div.stButton > button[kind="primary"]:disabled {{
-            background: #eee; border: 1px dashed rgb(212,212,212); color: {MUTED};
+            background: {GREEN}; border-color: {GREEN}; color: #fff; opacity: .45;
         }}
-        div.stButton > button {{ border-radius: 6px; }}
+        div.stButton > button {{
+            border-radius: 6px; transition: opacity .3s ease .15s, background .3s ease;
+        }}
         div.stButton > button p {{ white-space: nowrap; }}
         @keyframes de-spin {{ to {{ transform: rotate(360deg); }} }}
         div[class*="st-key-publish_go_busy"] button::before {{

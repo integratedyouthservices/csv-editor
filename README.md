@@ -23,7 +23,7 @@ Auth is `iap`, so a request that doesn't come through Identity-Aware Proxy carri
 | 1b Editing | toolbar (title, file info, search, Export Data, Import Data, "Review changes (n)" badge, avatar), grid |
 | 2a Search | as-you-type filtering, blue filter bar (`Showing x of n rows matching "…"`), Clear search, yellow match highlighting; **edits on hidden rows are kept and the badge count is unchanged** |
 | 1c Review | only edited rows, green-tinted changed cells showing `old → new`, cells still editable, summary "n rows · m cells changed", plus a diff panel with struck-through old values |
-| 1d Validation | invalid cells get the red fill + outline + inline `✗ …` message; summary turns red ("k cells invalid"); Publish disabled (grey, dashed border) |
+| 1d Validation | invalid cells get the red fill + outline + inline `✗ …` message; summary turns red ("k cells invalid"); Publish disabled (faded green) |
 | 1e Publish | modal dialog with dynamic cell/row counts, Cancel / "Yes, publish" |
 | — Import | file uploader (CSV only) → column-shape check → whole-file validation review (no path back to the editor except an explicit discard) → publish, gated on zero errors |
 
