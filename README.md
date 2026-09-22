@@ -150,6 +150,8 @@ This section covers the `iap` + `gcs_parquet` provider pair. IAP isn't optional 
 |---|---|---|
 | `IAP_AUDIENCE` | `iap` auth | Expected audience of the IAP-signed identity token — `/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID` (external HTTPS load balancer) or `/projects/PROJECT_NUMBER/apps/PROJECT_ID` (App Engine). See [CONFIG.md](CONFIG.md#iap--identity-aware-proxy-the-only-provider). |
 | `IAP_LOGIN_URL` | `iap` auth | Optional. Where the landing page's "Log in" button sends the browser; must be the IAP-protected URL. Defaults to `/`, which is correct when the app is only ever reachable through IAP. |
+| `GCS_BUCKET` | `gcs_parquet` storage | **Required.** Bucket holding the parquet dataset — non-prod `collab-nprod-data`. There is no default in `config.yaml`: unset, the app fails at startup rather than guess. Supplying it at run time is what lets one container image be promoted between environments without a rebuild. |
+| `CHANGE_LOG_PROJECT` | `gcs_parquet` storage | **Required.** GCP project holding the BigQuery change-log table — non-prod `collab-infra-nprod`. Same as above: no default, fails at startup if unset. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | `gcs_parquet` storage | Path to a service account key JSON — **omit this entirely** if running on GCP infrastructure that already provides Application Default Credentials (Cloud Run's attached runtime service account, GCE metadata server, etc.); only needed for local development against real GCP resources. |
 
 ### IAM roles (for the runtime service account)
@@ -193,8 +195,10 @@ gcloud run deploy 988-data-editor \
   --source . \
   --region us-central1 \
   --no-allow-unauthenticated \
-  --set-env-vars IAP_AUDIENCE=/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID
+  --set-env-vars IAP_AUDIENCE=/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID,GCS_BUCKET=collab-nprod-data,CHANGE_LOG_PROJECT=collab-infra-nprod
 ```
+
+`GCS_BUCKET` and `CHANGE_LOG_PROJECT` are what point the image at one environment rather than another — set them per deployment (non-prod values shown) rather than rebuilding. Neither has a default: if either is missing the app stops at startup with an error naming the variable, which is deliberate — a silent fallback would have pointed a prod deployment at the non-prod bucket.
 
 Then wire the service to an external HTTPS load balancer with IAP enabled, per the link above — `--no-allow-unauthenticated` alone doesn't set up IAP, it just ensures the Cloud Run URL can't be hit directly outside of it.
 

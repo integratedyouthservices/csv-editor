@@ -82,14 +82,25 @@ storage:
   gcs_parquet:
     # A single parquet object on GCS — read/written in-memory, no local
     # temp files (see providers/storage/gcs_parquet.py).
-    bucket: collab-nprod-data
+    #
+    # The bucket and the change-log project differ per environment, so both
+    # come from env vars — that lets one container image be promoted from
+    # non-prod to prod without a rebuild. Same `<key>_env` convention as the
+    # auth block above.
+    #
+    # There is deliberately NO inline `bucket:` fallback here: an unset
+    # GCS_BUCKET must fail at startup rather than silently send a prod
+    # deployment at the non-prod bucket. Non-prod value: collab-nprod-data.
+    bucket_env: GCS_BUCKET
     blob_path: collaborator_988_raw/raw_crisis_988_data/geo_coded_988_data.parquet
     id_column: null           # null → use file row order as the row id
     # Change-log audit trail (BigQuery). Same 17 columns as the dataset,
     # plus change_id/change_state/change_type/changed_by/changed_at — see
     # core/audit.py. Written BEFORE the parquet write on every publish.
     change_log:
-      project: collab-infra-nprod
+      # Required, no inline fallback — same reason as bucket_env above.
+      # Non-prod value: collab-infra-nprod.
+      project_env: CHANGE_LOG_PROJECT
       dataset: collaborator_988_raw
       table: 988_change_log
       location: US

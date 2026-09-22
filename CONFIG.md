@@ -174,11 +174,11 @@ The dataset lives as a single parquet object on Google Cloud Storage; every publ
 storage:
   provider: gcs_parquet
   gcs_parquet:
-    bucket: collab-nprod-data
+    bucket_env: GCS_BUCKET             # required; no inline fallback
     blob_path: collaborator_988_raw/raw_crisis_988_data/geo_coded_988_data.parquet
     id_column: null           # null → row order is the row id
     change_log:
-      project: collab-infra-nprod
+      project_env: CHANGE_LOG_PROJECT  # required; no inline fallback
       dataset: collaborator_988_raw
       table: 988_change_log
       location: US
@@ -189,6 +189,7 @@ pip install google-cloud-storage google-cloud-bigquery pyarrow
 gcloud auth application-default login   # or GOOGLE_APPLICATION_CREDENTIALS
 ```
 
+- **`bucket` and `change_log.project` come from the environment, and are required.** `bucket_env`/`project_env` name an env var (`GCS_BUCKET`, `CHANGE_LOG_PROJECT`) — same `<key>_env` convention as the auth block. The reason is deployment: those two values are the only per-environment difference between non-prod and prod, so one container image can be promoted by changing env vars instead of rebuilding. **There is intentionally no inline `bucket:`/`project:` fallback** — an unset variable stops the app at startup with an error naming it, rather than silently pointing a prod deployment at the non-prod bucket. (Adding an inline value back *would* make it a fallback: the env var wins when non-empty, the inline value is used otherwise. Every `<key>_env` in this block works that way.)
 - Every read/write moves through an in-memory buffer only (`blob.download_as_bytes()` / `blob.upload_from_string()`) — never a local temp file, so there's nothing left open or half-written if something fails partway through. A GCS object write is a single atomic PUT: readers never see a partial object.
 - `change_log` is **required** — the table must already exist with the dataset's 17 data columns plus `change_id`, `change_state` (`before`/`after`), `change_type` (`insert`/`update`/`delete`), `changed_by`, `changed_at`. See the README's "Audit / change log" section for exactly how rows are built.
 - **Write order is audit-first**, unlike `local_csv`/`bigquery` above: the change-log write happens *before* the parquet write on every publish. If the parquet write then fails, the app surfaces a distinct blocking error rather than silently leaving the data unwritten while the log says otherwise — see the README for why this ordering was chosen.

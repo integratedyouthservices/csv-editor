@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 from typing import Any
 
 import pandas as pd
@@ -33,20 +34,71 @@ def _is_precondition_failure(exc: Exception) -> bool:
     return getattr(exc, "code", None) == 412
 
 
+def _resolve_env(settings: dict[str, Any]) -> dict[str, Any]:
+    """Settings with every `<key>_env` resolved into `<key>`.
+
+    Same convention as the auth providers: `bucket_env: GCS_BUCKET` in
+    config.yaml means "read the bucket from $GCS_BUCKET", and a non-empty env
+    var wins over any inline `bucket:` value. That is what lets one container
+    image be promoted between environments — the non-prod and prod bucket and
+    change-log project are supplied by the runtime, not baked into the image.
+    Applied to the top level and to the nested `change_log` block.
+    """
+
+    def resolve(block: dict[str, Any]) -> dict[str, Any]:
+        out = dict(block)
+        for key, env_name in block.items():
+            if not key.endswith("_env") or not env_name:
+                continue
+            value = os.environ.get(str(env_name))
+            if value:
+                out[key[: -len("_env")]] = value
+        return out
+
+    resolved = resolve(settings)
+    change_log = settings.get("change_log")
+    if isinstance(change_log, dict):
+        resolved["change_log"] = resolve(change_log)
+    return resolved
+
+
+def _missing(setting_path: str, env_name: Any) -> str:
+    """Startup error for a setting that resolved to nothing.
+
+    Deliberately blunt: these are per-environment values with no fallback in
+    config.yaml, so an unset env var must stop the app here rather than let a
+    prod deployment quietly read and write the non-prod bucket.
+    """
+    if env_name:
+        return (
+            f"{setting_path} is not set. Set the {env_name} environment variable "
+            f"on the container (docker run -e {env_name}=..., or Cloud Run "
+            f"--set-env-vars {env_name}=...). There is no default: see the "
+            "README's \"Secrets / environment variables\" section."
+        )
+    return f"{setting_path} is required"
+
+
 class GcsParquetStorageProvider(StorageProvider):
     name = "gcs_parquet"
     audit_before_data_write = True
     supports_import = True
 
     def __init__(self, settings: dict[str, Any]):
-        super().__init__(settings)
+        super().__init__(_resolve_env(settings))
         for key in ("bucket", "blob_path"):
-            if not settings.get(key):
-                raise StorageError(f"storage.gcs_parquet.{key} is required")
-        change_log = settings.get("change_log") or {}
+            if not self.settings.get(key):
+                raise StorageError(_missing(f"storage.gcs_parquet.{key}", settings.get(f"{key}_env")))
+        change_log = self.settings.get("change_log") or {}
+        raw_change_log = settings.get("change_log") or {}
         for key in ("project", "dataset", "table"):
             if not change_log.get(key):
-                raise StorageError(f"storage.gcs_parquet.change_log.{key} is required")
+                raise StorageError(
+                    _missing(
+                        f"storage.gcs_parquet.change_log.{key}",
+                        raw_change_log.get(f"{key}_env"),
+                    )
+                )
 
         try:
             from google.cloud import bigquery, storage  # noqa: F401
