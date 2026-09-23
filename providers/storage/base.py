@@ -7,6 +7,7 @@ import pandas as pd
 
 ROW_ID = "_row_id"
 EditMap = dict[tuple[Any, str], Any]
+RowValues = dict[str, Any]      # one whole row, {column: value}
 
 # Where a loaded frame carries the backend version it was read at, for
 # providers that can detect a concurrent write (see stamp_version).
@@ -65,6 +66,54 @@ class StorageProvider(ABC):
         stays the authoritative guard. Default is a no-op.
         """
         return None
+
+    def apply_changes(
+        self,
+        df: pd.DataFrame,
+        edits: EditMap,
+        inserts: list[RowValues] | tuple = (),
+        deletes: list[Any] | tuple = (),
+    ) -> None:
+        """Cell edits plus whole-row inserts/deletes. `df` excludes the
+        pending new rows; they arrive as `inserts`. A backend that can't
+        add or delete rows refuses rather than publishing part of the set.
+        """
+        if inserts or deletes:
+            raise StorageError(
+                f"the '{self.name}' storage provider cannot add or delete rows"
+            )
+        self.apply_edits(df, edits)
+
+    def _frame_with_changes(
+        self,
+        df: pd.DataFrame,
+        edits: EditMap,
+        inserts: list[RowValues] | tuple = (),
+        deletes: list[Any] | tuple = (),
+    ) -> pd.DataFrame:
+        """The rewritten frame behind apply_changes for any provider that
+        replaces its file wholesale, so a row add costs no more than an edit.
+        """
+        updated = df.copy()
+        for (row_id, column), value in edits.items():
+            updated.loc[row_id, column] = value
+
+        if deletes:
+            updated = updated.drop(index=[r for r in deletes if r in updated.index])
+
+        if inserts:
+            id_column = self.settings.get("id_column")
+            if id_column and any(not str(row.get(id_column, "")).strip() for row in inserts):
+                raise StorageError(
+                    f"new rows need a value for the id column '{id_column}'"
+                )
+            new_rows = pd.DataFrame(
+                [{c: row.get(c, "") for c in updated.columns} for row in inserts],
+                columns=updated.columns,
+            )
+            updated = pd.concat([updated, new_rows], ignore_index=True)
+
+        return updated
 
     def write_audit(
         self, metadata: dict[str, Any], records: list[dict[str, Any]]

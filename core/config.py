@@ -85,6 +85,27 @@ class AppConfig:
         cols = self.raw.get("dataset", {}).get("columns", []) or []
         return [ColumnRule.from_dict(c) for c in cols]
 
+    @property
+    def identity_columns(self) -> list[str]:
+        """Columns forming the composite key a CSV import diffs rows on.
+
+        This dataset has no id column, so row identity is a natural key. Only
+        the import path uses it; cell edits already know which row they hit.
+        Empty means "don't diff" -- an import then logs every row as an
+        insert, the behaviour before diffing existed.
+        """
+        raw = list(self.raw.get("dataset", {}).get("identity_columns") or [])
+        known = {c.name for c in self.columns}
+        unknown = [c for c in raw if c not in known]
+        if unknown:
+            # Dropping a typo silently would quietly weaken the key an audit
+            # trail is matched on, so this is fatal rather than best-effort.
+            raise ValueError(
+                "dataset.identity_columns names column(s) that are not in "
+                "dataset.columns: " + ", ".join(unknown)
+            )
+        return raw
+
 
 def load_config(path: Optional[str | Path] = None) -> AppConfig:
     cfg_path = Path(path or os.environ.get(CONFIG_ENV_VAR, DEFAULT_CONFIG_PATH))

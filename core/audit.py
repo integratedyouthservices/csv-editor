@@ -98,3 +98,55 @@ def rows_for_full_replace(
         after = {col: row.get(col) for col in data_columns}
         rows.append(insert_row(after, data_columns, changed_by, changed_at))
     return rows
+
+
+def _identity_key(values: Mapping[str, Any], identity_columns: list[str]) -> tuple:
+    snap = _snapshot(values, identity_columns)
+    return tuple(snap[col] for col in identity_columns)
+
+
+def _by_identity(
+    df: pd.DataFrame, data_columns: list[str], identity_columns: list[str]
+) -> dict[tuple, list[dict[str, Any]]]:
+    grouped: dict[tuple, list[dict[str, Any]]] = {}
+    for _, row in df.iterrows():
+        values = {col: row.get(col) for col in data_columns}
+        grouped.setdefault(_identity_key(values, identity_columns), []).append(
+            _snapshot(values, data_columns)
+        )
+    return grouped
+
+
+def rows_for_replace_diff(
+    original_df: pd.DataFrame,
+    new_df: pd.DataFrame,
+    data_columns: list[str],
+    identity_columns: list[str],
+    changed_by: str,
+    changed_at: str,
+) -> list[dict[str, Any]]:
+    if not identity_columns:
+        return rows_for_full_replace(new_df, data_columns, changed_by, changed_at)
+
+    old_groups = _by_identity(original_df, data_columns, identity_columns)
+    new_groups = _by_identity(new_df, data_columns, identity_columns)
+
+    rows: list[dict[str, Any]] = []
+    for key, new_rows in new_groups.items():
+        old_rows = old_groups.get(key, [])
+        for i, after in enumerate(new_rows):
+            if i < len(old_rows):
+                before = old_rows[i]
+                if before != after:
+                    rows.extend(
+                        update_rows(before, after, data_columns, changed_by, changed_at)
+                    )
+            else:
+                rows.append(insert_row(after, data_columns, changed_by, changed_at))
+
+    for key, old_rows in old_groups.items():
+        surplus = old_rows[len(new_groups.get(key, [])):]
+        for before in surplus:
+            rows.append(delete_row(before, data_columns, changed_by, changed_at))
+
+    return rows

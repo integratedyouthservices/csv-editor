@@ -221,9 +221,10 @@ class GcsParquetStorageProvider(StorageProvider):
         return blob.generation
 
     def apply_edits(self, df: pd.DataFrame, edits: EditMap) -> None:
-        updated = df.copy()
-        for (row_id, column), value in edits.items():
-            updated.loc[row_id, column] = value
+        self.apply_changes(df, edits)
+
+    def apply_changes(self, df, edits, inserts=(), deletes=()) -> None:
+        updated = self._frame_with_changes(df, edits, inserts, deletes)
         # Advance the caller's baseline, so a second publish in the same
         # session isn't rejected as stale against the generation we just wrote.
         stamp_version(df, self._write_parquet(updated, version_of(df)))

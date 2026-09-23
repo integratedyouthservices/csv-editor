@@ -140,6 +140,7 @@ storage:
 - `path`: which CSV to edit. Publishing writes back to this file atomically.
 - `id_column`: if your CSV has a stable unique key column (e.g. `id`), name it here; edits are then keyed by that value instead of row position. Must be unique — duplicates fail the load with a clear error.
 - Audit trail: each publish appends one JSON line to `<path>.audit.jsonl` next to the CSV (who, when, and every changed cell). No config needed.
+- Adding and deleting rows is supported: the whole file is rewritten on publish either way (the shared `StorageProvider._frame_with_changes()` builds the new frame; `local_parquet`/`gcs_parquet` use the same helper). With `id_column` set, a row added in the editor must carry a value for that column or the publish is refused (a blank key would break the next load).
 
 ### `bigquery` — Google BigQuery (current production target)
 
@@ -163,7 +164,8 @@ storage:
   export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
   ```
 - `id_column` is mandatory — publishing runs a single `MERGE` keyed on it, so all cells land atomically or not at all.
-- `audit_table`: if present, the post-publish audit write inserts one row per changed cell (`row_id, column, old_value, new_value, timestamp, user, last_updated_at, last_updated_by`). Create the table with those STRING columns. If the audit insert fails the publish still stands; the app shows a non-blocking warning. Omit the key entirely to disable the audit write.
+- `audit_table`: if present, the post-publish audit write inserts one row per changed cell (`row_id, column, old_value, new_value, change_type, timestamp, user, last_updated_at, last_updated_by`). `change_type` is `insert` | `update` | `delete`; an added row logs every column with a blank `old_value`, a deleted row every column with a blank `new_value`. Create the table with those STRING columns. If the audit insert fails the publish still stands; the app shows a non-blocking warning. Omit the key entirely to disable the audit write.
+- Row deletes are supported (a parameterised `DELETE` on `id_column`, run before the edits `MERGE` — the two are separate statements, so a publish that both deletes and edits is not all-or-nothing across the pair). **Adding rows is not**: the editor has no way to mint a value for `id_column`, so a publish containing a new row is refused with a clear error. Wire up whatever the real table uses (a `DEFAULT`/autoincrement column, a UUID, a sequence) in `BigQueryStorageProvider.apply_changes` to enable it.
 - Current limitation: edited values are bound as STRING parameters. If your table has typed columns (FLOAT64, etc.), add per-column `CAST`s in `providers/storage/bigquery.py` (the spot is marked at the `SET` clause builder).
 
 ### `gcs_parquet` — GCS parquet file + BigQuery change log (988 GCP deployment)
@@ -193,12 +195,13 @@ gcloud auth application-default login   # or GOOGLE_APPLICATION_CREDENTIALS
 - Every read/write moves through an in-memory buffer only (`blob.download_as_bytes()` / `blob.upload_from_string()`) — never a local temp file, so there's nothing left open or half-written if something fails partway through. A GCS object write is a single atomic PUT: readers never see a partial object.
 - `change_log` is **required** — the table must already exist with the dataset's 17 data columns plus `change_id`, `change_state` (`before`/`after`), `change_type` (`insert`/`update`/`delete`), `changed_by`, `changed_at`. See the README's "Audit / change log" section for exactly how rows are built.
 - **Write order is audit-first**, unlike `local_csv`/`bigquery` above: the change-log write happens *before* the parquet write on every publish. If the parquet write then fails, the app surfaces a distinct blocking error rather than silently leaving the data unwritten while the log says otherwise — see the README for why this ordering was chosen.
-- Supports the app's CSV **Import** feature (`supports_import = True`): an imported file fully replaces the parquet object; every row is logged as a fresh `insert`.
+- Supports the app's CSV **Import** feature (`supports_import = True`): an imported file fully replaces the parquet object. The change log records the *diff* against what's published, matched on `dataset.identity_columns` — updates, inserts and deletes, not one `insert` per row.
+- Supports **adding and deleting rows** in the editor: the object is rewritten wholesale on every publish anyway, so a row add or delete costs no more than a cell edit and lands in the same atomic PUT. `local_parquet` (the on-disk twin used for development) behaves identically.
 - **Known limitation**: publishing rewrites the entire parquet object from an in-memory DataFrame, so two concurrent editors can clobber each other's *unrelated* changes (a bigger blast radius than `bigquery`'s targeted per-cell `MERGE` above). Not hardened in this version — a future enhancement would use GCS generation preconditions (`if_generation_match`) to fail loudly instead of clobbering.
 
 ### Adding a new storage provider (e.g. Postgres, S3)
 
-Same pattern as auth: subclass `StorageProvider` (`providers/storage/base.py` documents the contract — `load()` returns a DataFrame indexed by a stable unique row id; `apply_edits()` persists `{(row_id, column): value}`; `write_audit()` and `replace_all()` are optional, as are the `audit_before_data_write`/`supports_import` class attributes that control ordering and gate the Import feature), register it in `providers/storage/__init__.py`, add a settings block, point `storage.provider` at it.
+Same pattern as auth: subclass `StorageProvider` (`providers/storage/base.py` documents the contract — `load()` returns a DataFrame indexed by a stable unique row id; `apply_edits()` persists `{(row_id, column): value}`; `apply_changes()` adds whole-row inserts/deletes — the base class refuses them rather than dropping them silently, and `_frame_with_changes()` does the work for any provider that rewrites its file wholesale; `write_audit()` and `replace_all()` are optional, as are the `audit_before_data_write`/`supports_import` class attributes that control ordering and gate the Import feature), register it in `providers/storage/__init__.py`, add a settings block, point `storage.provider` at it.
 
 ---
 
@@ -207,12 +210,28 @@ Same pattern as auth: subclass `StorageProvider` (`providers/storage/base.py` do
 ```yaml
 dataset:
   display_name: resources.csv   # shown in the toolbar and publish dialog
+  identity_columns:             # composite key for change-log row matching
+    - name
+    - address
+    - city_town
+    - province_territory
   columns:                      # ORDER HERE = column order in the grid
     - name: service_category
       ...
 ```
 
 Each entry in `columns:` defines one column. **`type` is the single source of truth**: it decides which editor the grid opens for that cell AND how the value is validated.
+
+### `identity_columns` — what makes a row "the same row"
+
+A composite natural key identifying a row across two versions of the dataset, for change-log diffing (`core/audit.py`). This dataset has no id column, so identity has to be built from real data columns.
+
+> **Not yet wired on this branch.** `core/audit.py` and this key are present, but nothing on `master` calls them — master's publish path still writes the per-cell audit records described in the README. The consumer (a CSV import that diffs against what's published) lives on `gcp_launch`.
+
+- Every name listed must appear in `columns:`. One that doesn't raises at config load — a typo would quietly weaken the key the audit trail is matched on.
+- Choose fields that *identify* a service, not ones that *describe* it. Editing an identity column makes that row read as a `delete` plus an `insert` rather than an `update`, because the renamed row no longer matches.
+- Uniqueness is not enforced. Rows sharing a key are paired off in file order within that group; surplus on either side becomes an insert or a delete.
+- Omit the key (or leave it empty) to fall back to logging every row as an `insert`.
 
 ### Fields per column
 

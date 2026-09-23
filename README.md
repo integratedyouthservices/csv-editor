@@ -25,6 +25,7 @@ Auth is `iap`, so a request that doesn't come through Identity-Aware Proxy carri
 | 1c Review | only edited rows, green-tinted changed cells showing `old → new`, cells still editable, summary "n rows · m cells changed", plus a diff panel with struck-through old values |
 | 1d Validation | invalid cells get the red fill + outline + inline `✗ …` message; summary turns red ("k cells invalid"); Publish disabled (faded green) |
 | 1e Publish | modal dialog with dynamic cell/row counts, Cancel / "Yes, publish" |
+| — Add / delete rows | **＋ Add Row** at the right of the undo/redo strip appends a blank row and opens its first cell; right-click a row for **✕ Delete Row**, confirmed by a Cancel/OK modal |
 | — Import | file uploader (CSV only) → column-shape check → whole-file validation review (no path back to the editor except an explicit discard) → publish, gated on zero errors |
 
 ### Grid: a plain HTML table, not a Streamlit widget
@@ -67,9 +68,10 @@ sample_data/
 - `user` — session auth
 - `original_df` — dataset from the storage provider, indexed by a stable `_row_id`
 - `edits` — `{(row_id, column): new_value}`; reverting a cell to its original value removes the entry
+- `added_rows` / `deleted_rows` — pending whole-row changes (see [Adding & deleting rows](#adding--deleting-rows))
 - `import_df` / `import_edits` — an uploaded CSV pending review, and any corrections made on the import-review grid (separate from `edits` — importing doesn't touch the normal undo/redo history)
-- `view` — `editing | review | import_upload | import_review`; publish dialogs via `st.dialog`
-- Editor publish → provider `apply_edits()` → merge into `original_df`, clear `edits`
+- `view` — `editing | review | import_upload | import_review`; publish and delete-row dialogs via `st.dialog`
+- Editor publish → provider `apply_changes()` → merge into `original_df`, clear `edits`
 - Import publish → provider `replace_all()` → `original_df` becomes the imported data outright
 
 ## Swapping providers
@@ -135,10 +137,11 @@ The toolbar's "Export CSV" button re-fetches the dataset **fresh from the storag
 Every publish (an editor cell-edit publish, or an import full-replace publish) builds change-log rows via `core/audit.py` and hands them to `StorageProvider.write_audit(metadata, records)`:
 
 - **Update** (normal cell edits): edits are grouped **by row** first — a row with 3 edited cells produces one before/after pair, not three. Two rows are appended sharing one `change_id`: `change_state="before"` (the row's full original values) and `change_state="after"` (its full new values).
-- **Insert** (CSV import): one row per imported row, `change_state="after"` only — there's no "before" for a fresh import.
-- **Delete**: `core/audit.py::delete_row` exists for schema completeness (matching the change-log table's `change_type` values) but nothing in the UI triggers it — there's no row-delete feature in this app.
+- **Insert**: one row, `change_state="after"` only — there's no "before" for a row that didn't exist. Logged for a row added in the editor, and for a row an import brings in.
+- **Delete**: one row, `change_state="before"` only. Logged for a row deleted in the editor, and for one an import drops.
+- **Imports are diffed, not dumped**: `rows_for_replace_diff` matches the uploaded file against what's published on `dataset.identity_columns` (see [CONFIG.md](CONFIG.md)), so a full-file replace logs only what actually moved — an unchanged row logs nothing at all. With no `identity_columns` configured it falls back to logging every row as an insert.
 
-`local_csv` appends JSON lines to `<path>.audit.jsonl`; `bigquery` inserts into `storage.bigquery.audit_table` if configured; `gcs_parquet` inserts into its `change_log` table (required, not optional, for that provider). If the audit write fails the publish still stands and the app shows a non-blocking warning — **except** for `gcs_parquet`, which writes the change log **before** the parquet write (`audit_before_data_write = True`, the opposite order from the other two providers). That's a deliberate trade-off: if the parquet write then fails, the change log has an entry for something that never landed — the safer failure mode for a compliance log than data changing with no record of it at all — and the app surfaces that specific situation as its own distinct blocking error rather than a silent warning, since at that point a human needs to look.
+`local_csv` and `local_parquet` append JSON lines to `<path>.audit.jsonl`; `bigquery` inserts into `storage.bigquery.audit_table` if configured; `gcs_parquet` inserts into its `change_log` table (required, not optional, for that provider). If the audit write fails the publish still stands and the app shows a non-blocking warning — **except** for `gcs_parquet`, which writes the change log **before** the parquet write (`audit_before_data_write = True`, the opposite order from the other two providers). That's a deliberate trade-off: if the parquet write then fails, the change log has an entry for something that never landed — the safer failure mode for a compliance log than data changing with no record of it at all — and the app surfaces that specific situation as its own distinct blocking error rather than a silent warning, since at that point a human needs to look.
 
 ## GCP deployment
 
@@ -210,6 +213,23 @@ Sign-in is entirely IAP's: the landing page's **Log in** button is a plain navig
 
 **Sign out** (in the avatar popover) and **Sign in as a different user** (on the landing page) both go to `?gcp-iap-mode=CLEAR_LOGIN_COOKIE`, which clears IAP's login cookie and re-enters sign-in. Clearing `st.session_state` instead would achieve nothing: the next rerun would re-read the same still-valid assertion header and sign the same person straight back in.
 
+## Adding & deleting rows
+
+**＋ Add Row** sits at the right of the undo/redo strip and appends a blank row at the bottom of the table, opening an editor on its first cell. If the bottom row is already blank it just puts the cursor back in that one, so empty rows never stack up — and a row that is nothing but whitespace is dropped at publish rather than saved.
+
+**Delete Row** comes from right-clicking anywhere on a row outside a cell editor (inside one, the browser's own menu is the useful one). The menu item opens a Cancel / OK confirmation modal; OK marks the row, which then disappears from the editing grid.
+
+Both are ordinary pending changes until publish:
+
+| | on the editing grid | on Review changes | in the change log |
+|---|---|---|---|
+| added row | green row marker, cells editable | every cell reads as changed — edited tint, or the usual amber/red where the new value doesn't validate | one `after` row, `change_type: insert` |
+| deleted row | hidden | greyed, struck through, not editable | one `before` row, `change_type: delete` |
+
+Undo/redo covers both (undo after Add Row removes the row and its typed values; undo after a delete brings the row back), as does ↩ on the review screen's change list. A new row is validated whole, so its blank required columns raise the usual amber warnings; a deleted row is skipped by validation entirely, so an invalid value on a row you're removing doesn't block the publish.
+
+Persistence goes through `StorageProvider.apply_changes(df, edits, inserts, deletes)`. Every file-backed provider — `local_csv`, `local_parquet`, `gcs_parquet` — hands the work to the base class's `_frame_with_changes()` and writes the result through its own atomic writer, so a row add costs no more than a cell edit and lands in the same replace. `bigquery` supports deletes; adding rows is refused with a clear error because nothing can mint the table's `id_column` value yet — see [CONFIG.md](CONFIG.md). A provider that doesn't override `apply_changes` refuses inserts/deletes rather than publishing a partial change set.
+
 ## Keyboard shortcuts
 
 Ctrl/Cmd+Z = undo · Ctrl/Cmd+Shift+Z or Ctrl+Y = redo (suppressed while a cell editor has focus so native text-undo still works).
@@ -218,4 +238,4 @@ Ctrl/Cmd+Z = undo · Ctrl/Cmd+Shift+Z or Ctrl+Y = redo (suppressed while a cell 
 - Values are edited as strings and normalized by the storage provider on publish; typed BigQuery columns need the `CAST` noted in CONFIG.md's `bigquery` section once a typed schema is in use.
 - Search-match highlighting tints the whole matching cell (not just the matched substring).
 - Concurrent editors aren't coordinated: last publish wins. For `gcs_parquet` specifically this is a bigger blast radius than the other providers — a full-object rewrite, not a per-cell `MERGE` — see [CONFIG.md](CONFIG.md#gcs_parquet--gcs-parquet-file--bigquery-change-log-988-gcp-deployment) for the known limitation and a possible future hardening.
-- There is no row-delete feature anywhere in the app; the change-log schema supports `change_type="delete"` for completeness, but nothing produces one.
+- The grid's browser-side layer (double-click editor, right-click row menu, new-row focus) has no automated coverage — the Python tests drive it through the same bridge payloads the script sends, which pins the behaviour either side of the JS but not the JS itself.

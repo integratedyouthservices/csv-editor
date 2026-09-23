@@ -97,6 +97,48 @@ class BigQueryStorageProvider(StorageProvider):
         except Exception as exc:
             raise StorageError(f"BigQuery publish failed: {exc}") from exc
 
+    def apply_changes(self, df, edits, inserts=(), deletes=()) -> None:
+        """Cell edits + row deletes. Inserts are not supported yet.
+
+        Deleting is unambiguous (the row id is already known), so it runs
+        as a parameterised DELETE before the edits MERGE. The two are
+        separate statements: the MERGE is still atomic in itself, but a
+        publish that both deletes and edits is not all-or-nothing across
+        the pair. Wrap them in a BEGIN/COMMIT transaction if that
+        matters for the real table. Inserting is
+        not: `id_column` is the table's own key and the editor has no way
+        to mint one for a brand-new row. Wire up whatever the real table
+        uses (an autoincrement/DEFAULT column, a UUID, a sequence table)
+        here before enabling row adds against BigQuery.
+        """
+        from google.cloud import bigquery
+
+        if inserts:
+            raise StorageError(
+                "adding rows isn't supported on BigQuery yet — the new row has "
+                f"no value for the key column '{self.settings['id_column']}'. "
+                "See BigQueryStorageProvider.apply_changes."
+            )
+
+        if deletes:
+            sql = (
+                f"DELETE FROM {self._table_ref} "
+                f"WHERE CAST({self.settings['id_column']} AS STRING) IN UNNEST(@ids)"
+            )
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ArrayQueryParameter(
+                        "ids", "STRING", [str(r) for r in deletes]
+                    )
+                ]
+            )
+            try:
+                self._client().query(sql, job_config=job_config).result()
+            except Exception as exc:
+                raise StorageError(f"BigQuery delete failed: {exc}") from exc
+
+        self.apply_edits(df, edits)
+
     def write_audit(self, metadata, records) -> None:
         audit_table = self.settings.get("audit_table")
         if not audit_table:
