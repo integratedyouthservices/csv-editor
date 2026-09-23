@@ -11,6 +11,7 @@ from providers.storage.base import (
     EditMap,
     StorageError,
     StorageProvider,
+    blanks_as_null,
     stamp_version,
     version_of,
 )
@@ -232,13 +233,29 @@ class GcsParquetStorageProvider(StorageProvider):
     def replace_all(self, new_df: pd.DataFrame) -> None:
         stamp_version(new_df, self._write_parquet(new_df, version_of(new_df)))
 
+    def _change_log_field_types(self, client) -> dict[str, str]:
+        """{column: BigQuery type} for the change-log table.
+
+        Read on every publish rather than cached: the provider is a
+        process-wide singleton, so a cached schema would outlive a column
+        type change until the container restarts, and one metadata call per
+        publish is nothing next to the write it guards.
+        """
+        try:
+            table = client.get_table(self._change_log_ref)
+        except Exception as exc:
+            raise StorageError(
+                f"Could not read the change log schema for {self._change_log_ref}: {exc}"
+            ) from exc
+        return {field.name: field.field_type for field in table.schema}
+
     def write_audit(self, metadata, records) -> None:
         if not records:
             return
+        client = self._bigquery_client()
+        rows = blanks_as_null(records, self._change_log_field_types(client))
         try:
-            bq_errors = self._bigquery_client().insert_rows_json(
-                self._change_log_ref, records
-            )
+            bq_errors = client.insert_rows_json(self._change_log_ref, rows)
         except Exception as exc:
             raise StorageError(f"Change log write to {self._change_log_ref} failed: {exc}") from exc
         if bq_errors:

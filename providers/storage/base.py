@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Mapping
 
 import pandas as pd
 
@@ -34,6 +34,33 @@ def stamp_version(df: pd.DataFrame, version: Any) -> pd.DataFrame:
 def version_of(df: pd.DataFrame) -> Any:
     """The version `df` was loaded at, or None if the provider doesn't stamp one."""
     return df.attrs.get(VERSION_KEY)
+
+
+def blanks_as_null(
+    records: list[dict[str, Any]], field_types: Mapping[str, str]
+) -> list[dict[str, Any]]:
+    """Audit records with empty values turned into NULL for typed columns.
+
+    Every value in an audit record is a string: the editor loads the dataset
+    with `.astype(str)` and the before/after snapshot stringifies whatever it
+    finds. A change log whose columns mirror the data's real types therefore
+    gets `""` for an empty cell, and BigQuery rejects that outright — "Cannot
+    convert value to floating point (bad value): " for an unset longitude.
+    An empty cell means "no value", so that is what gets recorded. STRING
+    columns keep their empty string, which is a value they can hold and one
+    that reads back differently from a NULL. Columns the schema doesn't
+    mention are passed through untouched for the backend to complain about.
+    """
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        row: dict[str, Any] = {}
+        for key, value in record.items():
+            typed = (field_types.get(key) or "STRING").upper() != "STRING"
+            if typed and (value is None or not str(value).strip()):
+                value = None
+            row[key] = value
+        rows.append(row)
+    return rows
 
 
 class StorageProvider(ABC):

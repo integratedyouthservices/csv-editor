@@ -4,7 +4,13 @@ from typing import Any
 
 import pandas as pd
 
-from providers.storage.base import ROW_ID, EditMap, StorageError, StorageProvider
+from providers.storage.base import (
+    ROW_ID,
+    EditMap,
+    StorageError,
+    StorageProvider,
+    blanks_as_null,
+)
 
 
 class BigQueryStorageProvider(StorageProvider):
@@ -147,8 +153,16 @@ class BigQueryStorageProvider(StorageProvider):
         ref = f"{s['project']}.{s['dataset']}.{audit_table}"
         rows = [{**{k: (None if v is None else str(v)) for k, v in r.items()},
                  **metadata} for r in records]
+        client = self._client()
         try:
-            bq_errors = self._client().insert_rows_json(ref, rows)
+            table = client.get_table(ref)
+        except Exception as exc:
+            raise StorageError(f"Could not read the audit schema for {ref}: {exc}") from exc
+        # Same reason as the change log in gcs_parquet: these rows are all
+        # strings, and "" is not a number or a date as far as BigQuery cares.
+        rows = blanks_as_null(rows, {f.name: f.field_type for f in table.schema})
+        try:
+            bq_errors = client.insert_rows_json(ref, rows)
         except Exception as exc:
             raise StorageError(f"Audit write to {ref} failed: {exc}") from exc
         if bq_errors:
