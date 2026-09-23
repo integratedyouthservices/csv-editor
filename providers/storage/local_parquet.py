@@ -85,10 +85,10 @@ class LocalParquetStorageProvider(StorageProvider):
             raise StorageError(f"Failed to write {target}: {exc}") from exc
 
     def apply_edits(self, df: pd.DataFrame, edits: EditMap) -> None:
-        updated = df.copy()
-        for (row_id, column), value in edits.items():
-            updated.loc[row_id, column] = value
-        self._write_parquet(updated)
+        self.apply_changes(df, edits)
+
+    def apply_changes(self, df, edits, inserts=(), deletes=()) -> None:
+        self._write_parquet(self._frame_with_changes(df, edits, inserts, deletes))
 
     def replace_all(self, new_df: pd.DataFrame) -> None:
         self._write_parquet(new_df)

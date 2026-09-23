@@ -105,10 +105,15 @@ def test_grid_script_rebinds_its_listeners_on_every_run():
         js = _grid_script(autosize)
         assert "__deTableBound" not in js and "__deKeys " not in js
         assert "if (!P.__de" not in js          # no one-shot guards left
-        for event, ref in (("dblclick", "__deTableHandler"),
-                           ("keydown", "__deKeysHandler")):
-            assert f"removeEventListener('{event}', P.{ref}" in js
-            assert f"addEventListener('{event}', P.{ref}" in js
+        # Every listener goes on through bind(), which parks its
+        # (target, type, fn) on the parent window, and every run clears
+        # the previous run's list before binding again -- so no handler
+        # can outlive the realm it closes over.
+        assert "P.__deHandlers = [];" in js
+        assert "target.removeEventListener(type, fn, cap)" in js
+        assert "P.__deHandlers.push([target, type, fn, !!cap])" in js
+        for event in ("dblclick", "keydown", "contextmenu", "mousedown", "scroll"):
+            assert f"bind(doc, '{event}'" in js
 
 
 def test_non_autosized_grid_releases_the_editing_pages_height():
@@ -116,10 +121,11 @@ def test_non_autosized_grid_releases_the_editing_pages_height():
     inherits it as dead space unless the script clears it."""
     review = _grid_script(False)
     assert "removeProperty('--de-grid-h')" in review
-    assert "__deFitObserver = null" in review
+    assert "setProperty('--de-grid-h'" not in review
 
     editing = _grid_script(True)
     assert "setProperty('--de-grid-h'" in editing
+    assert "removeProperty('--de-grid-h')" not in editing
 
 
 def _user():

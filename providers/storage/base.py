@@ -11,6 +11,12 @@ Contract:
   * `apply_edits()` receives {(row_id, column): new_value} where every
     value has already passed validation, and must persist atomically
     where the backend allows it.
+  * `apply_changes()` is the same thing plus whole-row inserts and
+    deletes. Override it to support adding/deleting rows; the default
+    handles the edits-only case and refuses the rest rather than
+    silently dropping them.
+  * `replace_all()` swaps the whole dataset out (the CSV import).
+    Optional — set `supports_import = True` when you implement it.
 
 To add a provider:
   1. Subclass StorageProvider, implement load() + apply_edits().
@@ -26,6 +32,7 @@ import pandas as pd
 
 ROW_ID = "_row_id"
 EditMap = dict[tuple[Any, str], Any]
+RowValues = dict[str, Any]      # one whole row, {column: value}
 
 
 class StorageError(Exception):
@@ -74,6 +81,67 @@ class StorageProvider(ABC):
         """
         raise StorageError(f"{self.name} does not support replacing the whole dataset")
 
+    def apply_changes(
+        self,
+        df: pd.DataFrame,
+        edits: EditMap,
+        inserts: list[RowValues] | tuple = (),
+        deletes: list[Any] | tuple = (),
+    ) -> None:
+        """Persist cell edits plus whole-row inserts and deletes.
+
+        `df` is the current in-memory dataset WITHOUT the pending new
+        rows (they arrive as `inserts`, one {column: value} dict each,
+        already stripped of rows that were left entirely blank).
+        `deletes` is a list of row ids to remove.
+
+        The default supports edits only: a backend that cannot add or
+        delete rows raises instead of quietly publishing a partial
+        change set.
+        """
+        if inserts or deletes:
+            raise StorageError(
+                f"the '{self.name}' storage provider cannot add or delete rows"
+            )
+        self.apply_edits(df, edits)
+
+    def _frame_with_changes(
+        self,
+        df: pd.DataFrame,
+        edits: EditMap,
+        inserts: list[RowValues] | tuple = (),
+        deletes: list[Any] | tuple = (),
+    ) -> pd.DataFrame:
+        """The whole-dataset rewrite behind apply_changes for every
+        file-backed provider: apply the cell edits, drop the deleted
+        rows, append the new ones. A provider that rewrites its file
+        wholesale (CSV, parquet) just hands the result to its writer —
+        inserts and deletes then cost no more than a plain cell edit and
+        land in the same atomic replace.
+        """
+        updated = df.copy()
+        for (row_id, column), value in edits.items():
+            updated.loc[row_id, column] = value
+
+        if deletes:
+            updated = updated.drop(index=[r for r in deletes if r in updated.index])
+
+        if inserts:
+            id_column = self.settings.get("id_column")
+            if id_column and any(not str(row.get(id_column, "")).strip() for row in inserts):
+                # Row ids come from the data itself here; a blank one would
+                # break load()'s uniqueness check on the next read.
+                raise StorageError(
+                    f"new rows need a value for the id column '{id_column}'"
+                )
+            new_rows = pd.DataFrame(
+                [{c: row.get(c, "") for c in updated.columns} for row in inserts],
+                columns=updated.columns,
+            )
+            updated = pd.concat([updated, new_rows], ignore_index=True)
+
+        return updated
+
     def write_audit(
         self, metadata: dict[str, Any], records: list[dict[str, Any]]
     ) -> None:
@@ -88,6 +156,8 @@ class StorageProvider(ABC):
                     treat it as an opaque passthrough), so callers are free
                     to pass per-cell diffs, full before/after row snapshots,
                     or anything else a given deployment's audit store needs.
+                    This app passes the change-log rows built by
+                    core/audit.py — see that module for their shape.
 
         A failing write_audit() is non-blocking (see audit_before_data_write
         for the exception). Default: no-op for backends without an audit

@@ -10,10 +10,10 @@ so these helpers are the single source of truth for it.
 Semantics:
   update  - TWO rows sharing one change_id: change_state "before" (the
             row's original values) and "after" (its new values).
-  insert  - ONE row, change_state "after" only.
-  delete  - ONE row, change_state "before" only. Built for schema
-            completeness — there is no row-delete UI in this app, so
-            nothing calls this yet.
+  insert  - ONE row, change_state "after" only. Logged for a row added
+            in the editor, and for a row an import brings in.
+  delete  - ONE row, change_state "before" only. Logged for a row
+            deleted in the editor, and for one an import drops.
 """
 from __future__ import annotations
 
@@ -125,4 +125,81 @@ def rows_for_full_replace(
     for _, row in new_df.iterrows():
         after = {col: row.get(col) for col in data_columns}
         rows.append(insert_row(after, data_columns, changed_by, changed_at))
+    return rows
+
+
+def _identity_key(values: Mapping[str, Any], identity_columns: list[str]) -> tuple:
+    snap = _snapshot(values, identity_columns)
+    return tuple(snap[col] for col in identity_columns)
+
+
+def _by_identity(
+    df: pd.DataFrame, data_columns: list[str], identity_columns: list[str]
+) -> dict[tuple, list[dict[str, Any]]]:
+    """Group a frame's rows by their identity key, preserving row order.
+
+    Values are snapshotted here so both sides of a diff are compared as the
+    same stringified form that gets written to the change log -- otherwise a
+    float read back from parquet as 45.0 would look like a change against the
+    "45.0" that came in from a CSV.
+    """
+    grouped: dict[tuple, list[dict[str, Any]]] = {}
+    for _, row in df.iterrows():
+        values = {col: row.get(col) for col in data_columns}
+        grouped.setdefault(_identity_key(values, identity_columns), []).append(
+            _snapshot(values, data_columns)
+        )
+    return grouped
+
+
+def rows_for_replace_diff(
+    original_df: pd.DataFrame,
+    new_df: pd.DataFrame,
+    data_columns: list[str],
+    identity_columns: list[str],
+    changed_by: str,
+    changed_at: str,
+) -> list[dict[str, Any]]:
+    """Change-log rows for a full-file replace, diffed against what's published.
+
+    Rows are matched on `identity_columns` (a composite natural key -- this
+    dataset has no id column). A matched pair whose other values differ logs
+    one before/after update pair; a key only in the new file logs an insert;
+    a key only in the current data logs a delete; an unchanged row logs
+    nothing at all.
+
+    Identity keys are not guaranteed unique -- neither the import validator
+    nor the parquet enforces it -- so rows sharing a key are paired off in
+    file order within that group, and whichever side has more rows left over
+    contributes inserts or deletes. That keeps the diff total and
+    deterministic instead of failing a publish over duplicate data the editor
+    didn't create.
+
+    With no identity_columns configured there is nothing to match on, so this
+    falls back to logging every row as an insert (see rows_for_full_replace).
+    """
+    if not identity_columns:
+        return rows_for_full_replace(new_df, data_columns, changed_by, changed_at)
+
+    old_groups = _by_identity(original_df, data_columns, identity_columns)
+    new_groups = _by_identity(new_df, data_columns, identity_columns)
+
+    rows: list[dict[str, Any]] = []
+    for key, new_rows in new_groups.items():
+        old_rows = old_groups.get(key, [])
+        for i, after in enumerate(new_rows):
+            if i < len(old_rows):
+                before = old_rows[i]
+                if before != after:
+                    rows.extend(
+                        update_rows(before, after, data_columns, changed_by, changed_at)
+                    )
+            else:
+                rows.append(insert_row(after, data_columns, changed_by, changed_at))
+
+    for key, old_rows in old_groups.items():
+        surplus = old_rows[len(new_groups.get(key, [])):]
+        for before in surplus:
+            rows.append(delete_row(before, data_columns, changed_by, changed_at))
+
     return rows

@@ -120,6 +120,18 @@ storage:
 # ------------------------------------------------------------
 dataset:
   display_name: geo_coded_988_data.parquet
+  # Composite natural key used ONLY by the CSV import, to match uploaded rows
+  # against what's published so the change log records real updates/inserts/
+  # deletes instead of one insert per row. This dataset has no id column, so
+  # identity is these values together. Editing one of them makes a row read as
+  # a delete + an insert rather than an update -- keep the list to fields that
+  # identify a service, not ones that describe it. Remove/empty the list to go
+  # back to logging every imported row as an insert.
+  identity_columns:
+    - name
+    - address
+    - city_town
+    - province_territory
   columns:
     # Editor type per column: text | textarea | enum | float
     # required-but-blank cells are flagged (amber) but do NOT block
