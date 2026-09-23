@@ -11,6 +11,10 @@ Contract:
   * `apply_edits()` receives {(row_id, column): new_value} where every
     value has already passed validation, and must persist atomically
     where the backend allows it.
+  * `apply_changes()` is the same thing plus whole-row inserts and
+    deletes. Override it to support adding/deleting rows; the default
+    handles the edits-only case and refuses the rest rather than
+    silently dropping them.
 
 To add a provider:
   1. Subclass StorageProvider, implement load() + apply_edits().
@@ -26,6 +30,7 @@ import pandas as pd
 
 ROW_ID = "_row_id"
 EditMap = dict[tuple[Any, str], Any]
+RowValues = dict[str, Any]      # one whole row, {column: value}
 
 
 class StorageError(Exception):
@@ -52,6 +57,30 @@ class StorageProvider(ABC):
         """
         raise NotImplementedError
 
+    def apply_changes(
+        self,
+        df: pd.DataFrame,
+        edits: EditMap,
+        inserts: list[RowValues] | tuple = (),
+        deletes: list[Any] | tuple = (),
+    ) -> None:
+        """Persist cell edits plus whole-row inserts and deletes.
+
+        `df` is the current in-memory dataset WITHOUT the pending new
+        rows (they arrive as `inserts`, one {column: value} dict each,
+        already stripped of rows that were left entirely blank).
+        `deletes` is a list of row ids to remove.
+
+        The default supports edits only: a backend that cannot add or
+        delete rows raises instead of quietly publishing a partial
+        change set.
+        """
+        if inserts or deletes:
+            raise StorageError(
+                f"the '{self.name}' storage provider cannot add or delete rows"
+            )
+        self.apply_edits(df, edits)
+
     def write_audit(
         self, metadata: dict[str, Any], records: list[dict[str, Any]]
     ) -> None:
@@ -59,7 +88,11 @@ class StorageProvider(ABC):
 
         `metadata`: {"last_updated_at": iso-timestamp, "last_updated_by": email}
         `records`:  one dict per changed cell:
-                    {row_id, column, old_value, new_value, timestamp, user}
+                    {row_id, column, old_value, new_value, change_type,
+                     timestamp, user}
+                    `change_type` is insert | update | delete. An added
+                    row logs every column with a blank old_value, a
+                    deleted row every column with a blank new_value.
 
         The CSV publish stands even if this fails — the app surfaces a
         non-blocking warning. Default: no-op for backends without an
