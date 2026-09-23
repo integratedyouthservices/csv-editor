@@ -186,7 +186,12 @@ def _insert_blank_row(row_id: Any, at: int, seq: int) -> None:
         index=pd.Index([row_id], name=df.index.name),
         columns=df.columns,
     )
-    ss.original_df = pd.concat([df.iloc[:at], blank, df.iloc[at:]])
+    # concat drops `attrs` unless every input carries the same ones, and the
+    # blank row carries none -- so re-stamp the storage baseline the frame was
+    # loaded at, or adding a row would make the next publish look unbacked.
+    combined = pd.concat([df.iloc[:at], blank, df.iloc[at:]])
+    combined.attrs = dict(df.attrs)
+    ss.original_df = combined
     ss.added_rows.insert(seq, row_id)
 
 
